@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Script Name: Android Ultimate Flasher (Classic UI & Secured Edition)
-# Description: Professional Android flashing tool with original UI layout
+# Description: Professional Android flashing tool for Termux
 # ==============================================================================
 
 set -uo pipefail
@@ -97,7 +97,7 @@ device_identity_gate() {
     if ! command -v fastboot >/dev/null 2>&1; then
         bad "Fastboot command not found."
         return 1
-    }
+    fi
 
     local current_product="UNKNOWN"
     current_product="$(fb_var product || echo "UNKNOWN")"
