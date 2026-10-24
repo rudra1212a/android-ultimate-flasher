@@ -25,7 +25,7 @@ A professional, safety-first Android flashing and device management tool designe
 You can install the tool instantly in Termux with a single one-liner command. Just copy and paste the command below into your terminal:
 
 ```bash
-bash <(curl -s [https://raw.githubusercontent.com/rudra1212a/android-ultimate-flasher/main/install.sh](https://raw.githubusercontent.com/rudra1212a/android-ultimate-flasher/main/install.sh))
+bash <(curl -s https://raw.githubusercontent.com/rudra1212a/android-ultimate-flasher/main/install.sh)
 ```
 
 🚀 Usage
