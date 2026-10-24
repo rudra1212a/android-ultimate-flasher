@@ -303,12 +303,11 @@ reboot_screen() {
     pause
 }
 
-# --- Main Menu (Exact Original UI Layout with Crafted by Rudra) ---
+# --- Main Menu ---
 main_menu() {
     while true; do
         clear
         
-        # Tool status checks for display
         local fb_dot="${RED}●${RESET}"
         command -v fastboot >/dev/null 2>&1 && fb_dot="${GREEN}●${RESET}"
 
@@ -382,7 +381,6 @@ main_menu() {
     done
 }
 
-# --- Entry Point ---
 if [[ "${BASH_SOURCE[0]:-$0}" == "$0" ]]; then
     main_menu
 fi
