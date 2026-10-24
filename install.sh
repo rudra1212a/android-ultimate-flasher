@@ -12,8 +12,7 @@ INSTALL_DIR="$HOME/.android-ultimate-flashing-tool"
 mkdir -p "$INSTALL_DIR"
 
 # Download the main tool script from your GitHub repository
-# (GitHub ইউজারনেম ও রিপো নাম তোমার নিজের মতো করে এখানে বসিয়ে দেবে)
-TOOL_URL="https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/YOUR_REPO_NAME/main/tool.sh"
+TOOL_URL="https://raw.githubusercontent.com/rudra1212a/android-ultimate-flasher/main/tool.sh"
 
 echo -e "\033[1;34m[*] Downloading tool files from GitHub...\033[0m"
 if command -v curl >/dev/null 2>&1; then
