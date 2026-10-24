@@ -1,23 +1,5 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Setup & Installer Script for Android Ultimate Flasher (Crafted by Rudra)
-# ==============================================================================
-
-set -e
-
-echo -e "\033[1;34m[*] Installing Android Ultimate Flasher...\033[0m"
-
-# Target installation directory
-INSTALL_DIR="$HOME/.android-ultimate-flashing-tool"
-mkdir -p "$INSTALL_DIR"
-mkdir -p "$HOME/Download"
-
-echo -e "\033[1;34m[*] Writing tool configuration and files...\033[0m"
-
-# Write the entire tool.sh script directly via heredoc
-cat << 'EOF' > "$INSTALL_DIR/tool.sh"
-#!/usr/bin/env bash
-# ==============================================================================
 # Script Name: Android Ultimate Flasher (Classic UI & Secured Edition)
 # Description: Professional Android flashing tool with original UI layout
 # ==============================================================================
@@ -144,6 +126,7 @@ flash_image_screen() {
     echo -e "\n=== Flash Individual Image (.img) ==="
     if [ ! -d "$DL_DIR" ]; then
         warn "Download directory not found."
+        pause
         return 1
     fi
 
@@ -320,11 +303,12 @@ reboot_screen() {
     pause
 }
 
-# --- Main Menu ---
+# --- Main Menu (Exact Original UI Layout with Crafted by Rudra) ---
 main_menu() {
     while true; do
         clear
         
+        # Tool status checks for display
         local fb_dot="${RED}●${RESET}"
         command -v fastboot >/dev/null 2>&1 && fb_dot="${GREEN}●${RESET}"
 
@@ -398,22 +382,7 @@ main_menu() {
     done
 }
 
+# --- Entry Point ---
 if [[ "${BASH_SOURCE[0]:-$0}" == "$0" ]]; then
     main_menu
-fi
-EOF
-
-# Set executable permission for the tool
-chmod +x "$INSTALL_DIR/tool.sh"
-
-# Setup global command shortcut ('rudra') in Termux
-PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
-if [ -d "$PREFIX/bin" ]; then
-    ln -sf "$INSTALL_DIR/tool.sh" "$PREFIX/bin/rudra"
-    chmod +x "$PREFIX/bin/rudra"
-    echo -e "\033[1;32m[+] Installation completed successfully!\033[0m"
-    echo -e "\033[1;32m[+] You can now type 'rudra' anytime to launch your tool.\033[0m"
-else
-    echo -e "\033[1;31m[-] Error: Termux bin directory not found. Are you running this in Termux?\033[0m"
-    exit 1
 fi
