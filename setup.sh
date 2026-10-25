@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Script Name: Android Ultimate Flasher
-# Description: Professional Android flashing tool for Termux (Version 1.3)
+# Description: Professional Android flashing tool for Termux (Version 1.4)
 # ==============================================================================
 
 set -uo pipefail
 
-VERSION="1.3"
+VERSION="1.4"
 TERMUX_PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 BASE_DIR="$HOME/.android-ultimate-flashing-tool"
 LOG_FILE="$BASE_DIR/tool.log"
@@ -29,6 +29,23 @@ RESET='\033[0m'
 
 SPIN_FRAMES=("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
 US=$'\x1f'
+
+# ---------------------------- USB backend ------------------------------------
+# native  = normal android-tools (needs root or PC-like USB access)
+# termux  = termux-adb / termux-fastboot wrappers (work WITHOUT root via Termux:API)
+USB_MODE="native"
+DEV_STATE="unchecked"
+
+detect_usb_mode() {
+    if type -P termux-fastboot >/dev/null 2>&1 && type -P termux-adb >/dev/null 2>&1; then
+        USB_MODE="termux"
+    else
+        USB_MODE="native"
+    fi
+}
+fastboot() { if [ "$USB_MODE" = "termux" ]; then termux-fastboot "$@"; else command fastboot "$@"; fi; }
+adb()      { if [ "$USB_MODE" = "termux" ]; then termux-adb "$@"; else command adb "$@"; fi; }
+detect_usb_mode
 
 cursor_show() { printf '\033[?25h'; }
 cursor_hide() { printf '\033[?25l'; }
@@ -297,7 +314,7 @@ need_pkg() { # need_pkg <command> <package>
 check_tools() {
     local missing=0 cmd
     for cmd in fastboot adb; do
-        command -v "$cmd" >/dev/null 2>&1 || missing=1
+        type -P "$cmd" >/dev/null 2>&1 || type -P "termux-$cmd" >/dev/null 2>&1 || missing=1
     done
     if [ "$missing" -eq 1 ]; then
         warn "fastboot/adb not found. Installing android-tools..."
@@ -336,9 +353,14 @@ wait_for_device() { # <fastboot|sideload|any> -> 0 found, 1 back
     echo -e " ${GRAY}${tip}${RESET}"
     echo -e " ${GRAY}Press 0 or q to go back.${RESET}"
     echo ""
-    local start=$SECONDS i=0 key=""
+    local start=$SECONDS i=0 key="" hinted=0 chk=5
+    [ "$USB_MODE" = "termux" ] && chk=20
     cursor_hide
     while true; do
+        if [ "$hinted" -eq 0 ] && [ $((SECONDS - start)) -ge 10 ]; then
+            hinted=1
+            printf "\r\033[K${YELLOW}[!]${RESET} Not found? Go back (0) and open menu 9: USB Doctor.\n"
+        fi
         printf "\r\033[K${CYAN}[%s]${RESET} Searching %s device... %ss" \
             "${SPIN_FRAMES[$((i % 10))]}" "$label" "$((SECONDS - start))"
         i=$((i + 1))
@@ -358,9 +380,10 @@ wait_for_device() { # <fastboot|sideload|any> -> 0 found, 1 back
             sleep 0.2
         fi
 
-        if [ $((i % 5)) -eq 0 ] && _present; then
+        if [ $((i % chk)) -eq 0 ] && _present; then
             printf "\r\033[K"
             cursor_show
+            [ "$mode" = "fastboot" ] && DEV_STATE="fastboot" || DEV_STATE="adb"
             ok "Device found!"
             sleep 0.4
             return 0
@@ -1075,6 +1098,79 @@ wipe_data_screen() {
     pause
 }
 
+# ---------------------------- USB Doctor -------------------------------------
+usb_row() { # ok? label
+    if [ "$1" -eq 0 ]; then
+        echo -e " ${GREEN}✔${RESET} $2"
+    else
+        echo -e " ${RED}✘${RESET} $2"
+    fi
+}
+
+usb_doctor_screen() {
+    header "USB Connection Doctor"
+    detect_usb_mode
+    echo -e " Backend: ${BOLD}${USB_MODE}${RESET}"
+    echo ""
+    local a b c d devs
+    type -P adb >/dev/null 2>&1 && type -P fastboot >/dev/null 2>&1; a=$?
+    type -P termux-usb >/dev/null 2>&1; b=$?
+    type -P termux-fastboot >/dev/null 2>&1 && type -P termux-adb >/dev/null 2>&1; c=$?
+    usb_row "$a" "android-tools (adb + fastboot)"
+    usb_row "$b" "termux-api package (termux-usb)"
+    usb_row "$c" "termux-adb wrappers (no-root USB)"
+
+    devs=""
+    if [ "$b" -eq 0 ]; then
+        devs=$(termux-usb -l 2>/dev/null | grep -o '/dev/bus/usb/[0-9/]*' || true)
+    fi
+    if [ -n "$devs" ]; then usb_row 0 "USB device seen by Android"; else usb_row 1 "USB device seen by Android"; fi
+    if fb_present; then usb_row 0 "fastboot device responding"; else usb_row 1 "fastboot device responding"; fi
+    echo ""
+
+    if [ "$a" -ne 0 ]; then
+        warn "android-tools missing."
+        ask_yn "Install android-tools now?" y && animate "Installing android-tools" pkg install -y android-tools
+    fi
+    if [ "$b" -ne 0 ]; then
+        warn "termux-api package missing."
+        echo -e " ${GRAY}Also install the 'Termux:API' APP (same source as Termux).${RESET}"
+        ask_yn "Install termux-api package now?" y && animate "Installing termux-api" pkg install -y termux-api
+    fi
+    if [ "$c" -ne 0 ]; then
+        echo ""
+        warn "Without root, plain fastboot/adb usually CAN'T see the phone."
+        echo -e " ${GRAY}Fix: install the open-source 'termux-adb' wrappers${RESET}"
+        echo -e " ${GRAY}(github.com/nohajc/termux-adb). Needs internet.${RESET}"
+        if ask_yn "Install termux-adb wrappers now?" y; then
+            need_pkg curl curl || { pause; return 1; }
+            curl -fsSL https://raw.githubusercontent.com/nohajc/termux-adb/master/install.sh | bash
+            hash -r
+            detect_usb_mode
+            if [ "$USB_MODE" = "termux" ]; then ok "Installed. Backend: termux"; else bad "Install did not finish. Check internet and retry."; fi
+        fi
+    fi
+
+    if [ -n "$devs" ] && type -P termux-usb >/dev/null 2>&1; then
+        echo ""
+        if ask_yn "Request USB permission popup now?" y; then
+            local first
+            first=$(echo "$devs" | head -n1)
+            termux-usb -r "$first" >/dev/null 2>&1
+            say "Tap ALLOW on the popup (keep Termux open)."
+        fi
+    fi
+
+    echo ""
+    echo -e " ${CYAN}Checklist:${RESET}"
+    echo -e "  1. Use a DATA-capable cable + OTG adapter."
+    echo -e "  2. Target phone must be in fastboot mode."
+    echo -e "  3. Keep Termux open and tap ${BOLD}Allow${RESET} on the USB popup."
+    echo -e "  4. Termux & Termux:API from the SAME source."
+    echo -e "  5. Try another cable/adapter if still not seen."
+    pause
+}
+
 # ---------------------------- Main Menu --------------------------------------
 splash() {
     clear
@@ -1085,6 +1181,7 @@ splash() {
     echo ""
     progress_bar "Initializing" 24
     check_tools
+    detect_usb_mode
     setup_storage
     progress_bar "Scanning files" 12
 }
@@ -1106,8 +1203,14 @@ main_menu() {
         calc_layout
 
         local fb_ok=0 adb_ok=0
-        fb_present && fb_ok=1
-        adb_present && adb_ok=1
+        if [ "$USB_MODE" = "termux" ]; then
+            # avoid spamming USB permission popups: use cached state
+            [ "$DEV_STATE" = "fastboot" ] && fb_ok=1
+            [ "$DEV_STATE" = "adb" ] && adb_ok=1
+        else
+            fb_present && fb_ok=1
+            adb_present && adb_ok=1
+        fi
 
         local fb_dot="${RED}●${RESET}" adb_dot="${RED}●${RESET}" py_dot="${RED}●${RESET}"
         [ "$fb_ok" -eq 1 ] && fb_dot="${GREEN}●${RESET}"
@@ -1115,6 +1218,7 @@ main_menu() {
         command -v python3 >/dev/null 2>&1 && py_dot="${GREEN}●${RESET}"
 
         local dev_text="${RED}Not connected${RESET}"
+        [ "$USB_MODE" = "termux" ] && [ "$DEV_STATE" = "unchecked" ] && dev_text="${GRAY}Not checked (press c)${RESET}"
         if [ "$fb_ok" -eq 1 ]; then
             dev_text="${GREEN}Connected (fastboot)${RESET}"
         elif [ "$adb_ok" -eq 1 ]; then
@@ -1129,6 +1233,7 @@ main_menu() {
         draw_box "ANDROID ULTIMATE FLASHER" "Version ${VERSION} - Created by Rudra"
         echo ""
         echo -e "${M}Tools    $fb_dot fastboot  $adb_dot adb  $py_dot python"
+        echo -e "${M}USB      ${USB_MODE} mode"
         echo -e "${M}Device   $dev_text"
         echo -e "${M}Files    ${img_count} img • ${zip_count} zip • ${rom_count} rom"
         echo ""
@@ -1142,11 +1247,12 @@ main_menu() {
         mline 6 "${GREEN}" "Switch Slot"      "active A/B slot"
         mline 7 "${GREEN}" "Reboot"           "restart to a mode"
         mline 8 "${RED}" "Erase Data"         "factory reset"
+        mline 9 "${CYAN}" "USB Doctor"          "fix connection issues"
         msec "EXIT"
         mline 0 "${GREEN}" "Exit"             "quit application"
         echo ""
         echo -e "${M}${GREEN}●${RESET} Safe  ${YELLOW}●${RESET} Careful  ${RED}●${RESET} Erases data"
-        echo -e "${M}${GRAY}r = rescan storage${RESET}"
+        echo -e "${M}${GRAY}r = rescan storage   c = check device${RESET}"
         echo ""
         MENU_ANIM=0
         printf "%s Select: " "$M"
@@ -1162,6 +1268,13 @@ main_menu() {
             6) switch_slot_screen ;;
             7) reboot_screen ;;
             8) wipe_data_screen ;;
+            9) usb_doctor_screen ;;
+            c|C)
+                DEV_STATE="none"
+                if fb_present; then DEV_STATE="fastboot"; elif adb_present; then DEV_STATE="adb"; fi
+                say "Device state: $DEV_STATE"
+                sleep 1
+                ;;
             r|R)
                 DL_DIR=""
                 setup_storage
