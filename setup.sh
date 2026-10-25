@@ -134,7 +134,7 @@ flash_image_screen() {
     printf "  Select image number to flash (0 to cancel): "
     read -r img_choice
 
-    if [[ ! "$img_choice" =~ ^[0-9]+$ ]] || [ "$img_choice" -le 0 ] || [ "$img_choice" -gt "$count" ]; then
+    if [[ ! "$img_choice" =~ ^[0-9]+$ ]] || [ "$img_choice" -le 0 ]] || [ "$img_choice" -gt "$count" ]; then
         say "Cancelled."
         pause
         return 0
@@ -214,7 +214,7 @@ flash_sideload_screen() {
     printf "  Select zip file number to sideload (0 to cancel): "
     read -r zip_choice
 
-    if [[ ! "$zip_choice" =~ ^[0-9]+$ ]] || [ "$zip_choice" -le 0 ] || [ "$zip_choice" -gt "$count" ]; then
+    if [[ ! "$zip_choice" =~ ^[0-9]+$ ]] || [ "$zip_choice" -le 0 ]] || [ "$zip_choice" -gt "$count" ]; then
         say "Cancelled."
         pause
         return 0
