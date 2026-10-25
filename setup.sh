@@ -65,7 +65,7 @@ pause() {
 # Downloads directory setup (Placed safely after 'warn' function)
 DL_DIR="$HOME/storage/downloads"
 if [ ! -d "$DL_DIR" ]; then
-    warn "Storage not linked. Run 'termux-setup-storage' if needed.[span_5](start_span)[span_6](start_span)"[span_5](end_span)[span_6](end_span)
+    warn "Storage not linked. Run 'termux-setup-storage' if needed."
     DL_DIR="$HOME/Download"
     mkdir -p "$DL_DIR"
 fi
@@ -84,7 +84,7 @@ check_tools() {
 
 check_fastboot_device() {
     if ! fastboot devices 2>/dev/null | grep -q "fastboot"; then
-        bad "No fastboot device connected! Please connect phone in fastboot mode.[span_7](start_span)[span_8](start_span)"[span_7](end_span)[span_8](end_span)
+        bad "No fastboot device connected! Please connect phone in fastboot mode."
         pause
         return 1
     fi
@@ -124,7 +124,7 @@ flash_image_screen() {
     clear
     echo -e "\n=== Flash Individual Image (.img) ==="
     
-    check_fastboot_device || return 1[span_9](start_span)[span_9](end_span)[span_10](start_span)[span_10](end_span)
+    check_fastboot_device || return 1
 
     if [ ! -d "$DL_DIR" ]; then
         warn "Download directory not found."
@@ -145,7 +145,7 @@ flash_image_screen() {
     done
 
     if [ "$count" -eq 0 ]; then
-        warn "No .img files found in Downloads.[span_11](start_span)"[span_11](end_span)
+        warn "No .img files found in Downloads."
         pause
         return 1
     fi
@@ -225,7 +225,7 @@ flash_sideload_screen() {
     done
 
     if [ "$count" -eq 0 ]; then
-        warn "No .zip files found in Downloads.[span_12](start_span)"[span_12](end_span)
+        warn "No .zip files found in Downloads."
         pause
         return 1
     fi
@@ -253,20 +253,20 @@ flash_sideload_screen() {
 }
 
 flash_fastboot_screen() {
-    echo -e "\n=== Fastboot ROM Package Preview ===[span_13](start_span)"[span_13](end_span)
-    warn "Feature is under development.[span_14](start_span)"[span_14](end_span)
+    echo -e "\n=== Fastboot ROM Package Preview ==="
+    warn "Feature is under development."
     pause
 }
 
 flash_gsi_screen() {
-    echo -e "\n=== Flash GSI (Generic System Image) ===[span_15](start_span)"[span_15](end_span)
-    warn "Feature is under development.[span_16](start_span)"[span_16](end_span)
+    echo -e "\n=== Flash GSI (Generic System Image) ==="
+    warn "Feature is under development."
     pause
 }
 
 device_info_screen() {
-    echo -e "\n=== Device Information & Status ===[span_17](start_span)"[span_17](end_span)
-    check_fastboot_device || return 1[span_18](start_span)[span_18](end_span)[span_19](start_span)[span_19](end_span)
+    echo -e "\n=== Device Information & Status ==="
+    check_fastboot_device || return 1
     echo "------------------------------------------"
     echo " Product : $(fb_var product)"
     echo " Slot    : $(fb_var current-slot)"
@@ -276,8 +276,8 @@ device_info_screen() {
 }
 
 switch_slot_screen() {
-    echo -e "\n=== Switch A/B Slot ===[span_20](start_span)"[span_20](end_span)
-    check_fastboot_device || return 1[span_21](start_span)[span_21](end_span)[span_22](start_span)[span_22](end_span)
+    echo -e "\n=== Switch A/B Slot ==="
+    check_fastboot_device || return 1
     printf "  Enter target slot to switch (a or b): "
     read -r slot
     slot="${slot,,}"
@@ -346,7 +346,7 @@ reboot_screen() {
 
 wipe_data_screen() {
     echo -e "\n=== Factory Reset / Wipe Data ==="
-    check_fastboot_device || return 1[span_23](start_span)[span_23](end_span)[span_24](start_span)[span_24](end_span)
+    check_fastboot_device || return 1
     warn "WARNING: This will erase all personal data!"
     printf "  Type 'WIPE' to confirm: "
     read -r confirm
@@ -390,33 +390,33 @@ main_menu() {
             py_dot="${GREEN}●${RESET}"
         fi
 
-        local dev_text="${RED}Not connected${RESET}[span_25](start_span)[span_26](start_span)[span_27](start_span)[span_28](start_span)[span_29](start_span)"[span_25](end_span)[span_26](end_span)[span_27](end_span)[span_28](end_span)[span_29](end_span)
+        local dev_text="${RED}Not connected${RESET}"
         if fastboot devices 2>/dev/null | grep -q "fastboot" || adb devices 2>/dev/null | grep -qE "(device|sideload)$"; then
             dev_text="${GREEN}Connected${RESET}"
         fi
 
         local file_count=0
         if [ -d "$DL_DIR" ]; then
-            file_count=$(find "$DL_DIR" -mindepth 1 -maxdepth 1 \( -name "*.img" -o -name "*.zip" \) -type f 2>/dev/null | wc -l)[span_30](start_span)[span_30](end_span)
+            file_count=$(find "$DL_DIR" -mindepth 1 -maxdepth 1 \( -name "*.img" -o -name "*.zip" \) -type f 2>/dev/null | wc -l)
         fi
 
-        echo -e "${GREEN}+------------------------------------+${RESET}[span_31](start_span)"[span_31](end_span)
-        echo -e "${GREEN}|${RESET}      ANDROID ULTIMATE FLASHER      ${GREEN}|${RESET}[span_32](start_span)"[span_32](end_span)
-        echo -e "${GREEN}|${RESET}   Version ${VERSION} • Created by Rudra   ${GREEN}|${RESET}[span_33](start_span)"[span_33](end_span)
-        echo -e "${GREEN}+------------------------------------+${RESET}[span_34](start_span)"[span_34](end_span)
+        echo -e "${GREEN}+------------------------------------+${RESET}"
+        echo -e "${GREEN}|${RESET}      ANDROID ULTIMATE FLASHER      ${GREEN}|${RESET}"
+        echo -e "${GREEN}|${RESET}   Version ${VERSION} • Created by Rudra   ${GREEN}|${RESET}"
+        echo -e "${GREEN}+------------------------------------+${RESET}"
         echo ""
         echo -e " Tools    $fb_dot fastboot   $adb_dot adb   $py_dot python"
-        echo -e " Device   $dev_text[span_35](start_span)[span_36](start_span)[span_37](start_span)[span_38](start_span)[span_39](start_span)"[span_35](end_span)[span_36](end_span)[span_37](end_span)[span_38](end_span)[span_39](end_span)
-        echo -e " Files    $file_count in Downloads[span_40](start_span)"[span_40](end_span)
+        echo -e " Device   $dev_text"
+        echo -e " Files    $file_count in Downloads"
         echo ""
         echo -e " ${CYAN}- FLASH -${RESET}"
         echo -e "  1 ${GREEN}●${RESET} Flash Image        boot / recovery .img"
         echo -e "  2 ${GREEN}●${RESET} Custom ROM (ADB)   install .zip package"
-        echo -e "  3 ${YELLOW}●${RESET} Fastboot ROM       extract & flash pkg[span_41](start_span)"[span_41](end_span)
-        echo -e "  4 ${GREEN}●${RESET} Flash GSI          generic system image[span_42](start_span)"[span_42](end_span)
+        echo -e "  3 ${YELLOW}●${RESET} Fastboot ROM       extract & flash pkg"
+        echo -e "  4 ${GREEN}●${RESET} Flash GSI          generic system image"
         echo -e " ${CYAN}- DEVICE -${RESET}"
-        echo -e "  5 ${GREEN}●${RESET} Device Info        model, slot, lock[span_43](start_span)"[span_43](end_span)
-        echo -e "  6 ${GREEN}●${RESET} Switch Slot        active A/B slot[span_44](start_span)"[span_44](end_span)
+        echo -e "  5 ${GREEN}●${RESET} Device Info        model, slot, lock"
+        echo -e "  6 ${GREEN}●${RESET} Switch Slot        active A/B slot"
         echo -e "  7 ${GREEN}●${RESET} Reboot             restart to a mode"
         echo -e "  8 ${RED}●${RESET} Erase Data         factory reset"
         echo -e " ${CYAN}- EXIT -${RESET}"
@@ -430,10 +430,10 @@ main_menu() {
         case "${opt:-}" in
             1) flash_image_screen ;;
             2) flash_sideload_screen ;;
-            3) flash_fastboot_screen ;;[span_45](start_span)[span_45](end_span)
-            4) flash_gsi_screen ;;[span_46](start_span)[span_46](end_span)
-            5) device_info_screen ;;[span_47](start_span)[span_47](end_span)
-            6) switch_slot_screen ;;[span_48](start_span)[span_48](end_span)
+            3) flash_fastboot_screen ;;
+            4) flash_gsi_screen ;;
+            5) device_info_screen ;;
+            6) switch_slot_screen ;;
             7) reboot_screen ;;
             8) wipe_data_screen ;;
             0) 
