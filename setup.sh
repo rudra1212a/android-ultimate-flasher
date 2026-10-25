@@ -320,7 +320,20 @@ pick_file() {
     PICKED="${files[$IDX]}"
 }
 
-refresh_scan() { animate "Looking for files" do_scan; }
+# Everything that belongs to a ROM package (never offered as a loose image / zip / GSI)
+ROM_TREES=()
+refresh_rom_trees() {
+    collect_roms
+    ROM_TREES=("$ROMS_DIR")
+    local i
+    for ((i = 0; i < ${#ROM_PATH[@]}; i++)); do
+        [ "${ROM_KIND[$i]}" = arc ] || ROM_TREES+=("${ROM_PATH[$i]}")
+    done
+}
+in_rom_tree() { local t; for t in "${ROM_TREES[@]}"; do [[ "$1" == "$t"/* ]] && return 0; done; return 1; }
+file_size() { stat -c %s "$1" 2>/dev/null || echo 0; }
+
+refresh_scan() { animate "Looking for files" do_scan; refresh_rom_trees; }
 
 # ------------------------------ Safe flashing ---------------------------------
 flash_begin() { # battery warning + reminder
@@ -357,43 +370,39 @@ run_step() {
 }
 
 # ------------------------------ 1. Flash Image --------------------------------
-# Two steps: 1) choose the FOLDER, 2) choose the image inside it  -> PICKED
-is_rom_dir() { # ROM folder or its images folder
-    local d="$1"
-    compgen -G "$d/flash_all*.sh" >/dev/null 2>&1 && return 0
-    [ "$(basename "$d")" = images ] && compgen -G "$(dirname "$d")/flash_all*.sh" >/dev/null 2>&1 && return 0
-    return 1
-}
+# Standalone images only (recovery, boot, vbmeta ...). Images that belong to a ROM package
+# and huge system images (GSI) are hidden. Two steps: folder, then image -> PICKED
 pick_image() {
-    local alld=() plain=() roms=() dirs=() d f n lbl
-    mapfile -t alld < <(scan_list '\.img$' | while IFS= read -r f; do dirname "$f"; done | sort -u)
-    if [ "${#alld[@]}" -eq 0 ] || [ -z "${alld[0]:-}" ]; then
-        warn "No image (.img) found on your phone."
-        echo -e " ${GRAY}Copy it to the phone, then press 'r' in the main menu.${RESET}"
+    local cand=() dirs=() files=() f d n p
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        in_rom_tree "$f" && continue
+        [ "$(file_size "$f")" -gt 629145600 ] && continue
+        cand+=("$f")
+    done < <(scan_list '\.img$')
+    if [ "${#cand[@]}" -eq 0 ]; then
+        warn "No standalone image (.img) found on your phone."
+        echo -e " ${GRAY}Images inside ROM packages are hidden here - use Fastboot ROM.${RESET}"
+        echo -e " ${GRAY}Copy your image to the phone, then press 'r' in the main menu.${RESET}"
         return 1
     fi
-    for d in "${alld[@]}"; do if is_rom_dir "$d"; then roms+=("$d"); else plain+=("$d"); fi; done
-    dirs=("${plain[@]}" "${roms[@]}")
+    mapfile -t dirs < <(for f in "${cand[@]}"; do dirname "$f"; done | sort -u)
 
-    local files=() fl
     while true; do
         d=""
         if [ "${#dirs[@]}" -eq 1 ]; then d="${dirs[0]}"; else
             LIST=()
             for f in "${dirs[@]}"; do
-                n=$(find "$f" -maxdepth 1 -type f -iname '*.img' 2>/dev/null | grep -c .)
-                if is_rom_dir "$f"; then
-                    if [ "$(basename "$f")" = images ]; then lbl="${CYAN}ROM${RESET} $(shorten "$(basename "$(dirname "$f")")" $((COLS - 26)))"
-                    else lbl="${CYAN}ROM${RESET} $(shorten "$(basename "$f")" $((COLS - 26)))"; fi
-                elif [ "$f" = "$STORAGE_ROOT" ]; then lbl="(phone storage)"
-                else lbl="$(shorten "${f#"$STORAGE_ROOT"/}" $((COLS - 22)))"; fi
-                LIST+=("$lbl ${GRAY}(${n} img)${RESET}")
+                n=0; for p in "${cand[@]}"; do [ "$(dirname "$p")" = "$f" ] && n=$((n + 1)); done
+                if [ "$f" = "$STORAGE_ROOT" ]; then LIST+=("(phone storage) ${GRAY}(${n} img)${RESET}")
+                else LIST+=("$(shorten "${f#"$STORAGE_ROOT"/}" $((COLS - 22))) ${GRAY}(${n} img)${RESET}"); fi
             done
             echo -e " ${CYAN}Choose the folder:${RESET}\n"
             pick_index "Select folder" || return 1
             d="${dirs[$IDX]}"
         fi
-        mapfile -t files < <(find "$d" -maxdepth 1 -type f -iname '*.img' | sort)
+        files=()
+        for f in "${cand[@]}"; do [ "$(dirname "$f")" = "$d" ] && files+=("$f"); done
         LIST=()
         for f in "${files[@]}"; do LIST+=("${GRAY}$(printf '%6s' "$(human_size "$f")")${RESET} $(shorten "$(basename "$f")" $((COLS - 16)))"); done
         echo -e "\n ${CYAN}Images in:${RESET} ${GRAY}$(shorten "${d#"$STORAGE_ROOT"/}" $((COLS - 14)))${RESET}\n"
@@ -487,7 +496,24 @@ flash_image_screen() {
 flash_sideload_screen() {
     header "ADB Sideload Custom ROM"
     refresh_scan; echo ""
-    pick_file "Select zip number" '\.zip$' || { say "Cancelled."; pause; return 0; }
+    local zips=() z
+    while IFS= read -r z; do
+        [ -n "$z" ] || continue
+        in_rom_tree "$z" && continue
+        [[ "${z,,}" =~ (fastboot|_images_|images_v)[^/]*\.zip$ ]] && continue
+        [ "$(file_size "$z")" -ge 1048576 ] || continue
+        zips+=("$z")
+    done < <(scan_list '\.zip$')
+    if [ "${#zips[@]}" -eq 0 ]; then
+        warn "No flashable .zip found on your phone."
+        echo -e " ${GRAY}Copy the ROM/zip to the phone, then press 'r' in the main menu.${RESET}"
+        pause; return 0
+    fi
+    LIST=()
+    for z in "${zips[@]}"; do LIST+=("${GRAY}$(printf '%6s' "$(human_size "$z")")${RESET} $(shorten "${z#"$STORAGE_ROOT"/}" $((COLS - 16)))"); done
+    echo -e " ${CYAN}Zip packages on your phone:${RESET}\n"
+    pick_index "Select zip" || { say "Cancelled."; pause; return 0; }
+    PICKED="${zips[$IDX]}"
     echo ""
     wait_for_device sideload || return 0
     say "Sideloading $(shorten "$(basename "$PICKED")" $((COLS - 16)))..."
@@ -751,11 +777,14 @@ wait_userspace() {
 
 # Lists GSI images: by name, or any big .img (>600 MB) outside ROM folders
 gsi_candidates() {
-    { scan_list '(\.img\.(xz|gz)|/system[^/]*\.img|gsi[^/]*\.img)$' | grep -viE '/images/'
-      scan_list '\.img$' | grep -viE '/images/' | while IFS= read -r f; do
-          [ "$(stat -c %s "$f" 2>/dev/null || echo 0)" -gt 629145600 ] && echo "$f"
-      done
-    } | sort -u
+    local f lf
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        in_rom_tree "$f" && continue
+        lf="${f,,}"
+        if [[ "$lf" =~ \.img\.(xz|gz)$ || "$lf" =~ /system[^/]*\.img$ || "$lf" =~ gsi[^/]*\.img$ ]]; then echo "$f"
+        elif [ "$(file_size "$f")" -gt 629145600 ]; then echo "$f"; fi
+    done < <(scan_list '\.(img|img\.xz|img\.gz)$') | sort -u
 }
 
 flash_gsi_screen() {
