@@ -26,6 +26,7 @@ You can install the tool instantly in Termux with a single one-liner command. Ju
 
 ```bash
 pkg update -y && pkg install -y git curl android-tools && rm -rf ~/.android-ultimate-flashing-tool $PREFIX/bin/rudra && git clone https://github.com/rudra1212a/android-ultimate-flasher.git ~/.android-ultimate-flashing-tool && bash ~/.android-ultimate-flashing-tool/setup.sh
+
 ```
 
 🚀 Usage
