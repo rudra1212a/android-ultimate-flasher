@@ -133,6 +133,33 @@ fb_var() {
 }
 
 DEV_STATE="unchecked"
+# Small "connected" card with codename and basic info
+device_card() {
+    local prod slot unl ser mode_txt
+    if fb_present; then
+        DEV_STATE=fastboot; mode_txt="fastboot"
+        prod=$(fb_var product); slot=$(fb_var current-slot); unl=$(fb_var unlocked); ser=$(fb_var serialno)
+    else
+        DEV_STATE=adb; mode_txt="adb / recovery"
+        prod=$(adb shell getprop ro.product.device 2>/dev/null | tr -d '\r' | head -n1)
+        ser=$(adb get-serialno 2>/dev/null | tr -d '\r' | head -n1)
+        slot="-"; unl="-"
+    fi
+    [ -z "${prod:-}" ] && prod="UNKNOWN"
+    [ -z "${ser:-}" ] && ser="UNKNOWN"
+    ok "Connected successfully!"
+    echo -e " ${GRAY}$(hline $((CW - 2)) "─")${RESET}"
+    echo -e "  Codename : ${BOLD}${prod}${RESET}"
+    echo -e "  Mode     : ${BOLD}${mode_txt}${RESET}"
+    echo -e "  Serial   : ${BOLD}$(shorten "$ser" 24)${RESET}"
+    if [ "$mode_txt" = fastboot ]; then
+        echo -e "  Slot     : ${BOLD}${slot}${RESET}"
+        echo -e "  Unlocked : ${BOLD}${unl}${RESET}"
+    fi
+    echo -e " ${GRAY}$(hline $((CW - 2)) "─")${RESET}"
+    return 0
+}
+
 # wait_for_device fastboot|sideload|any  -> 0 found, 1 user pressed back
 wait_for_device() {
     local mode="$1" label="$1" tip chk=5 key="" i=0 t=$SECONDS hinted=0
@@ -142,7 +169,7 @@ wait_for_device() {
         *)        tip="Connect the phone with a data cable (OTG)."; label="fastboot/adb" ;;
     esac
     _here() { case "$mode" in fastboot) fb_present ;; sideload) sideload_present ;; *) fb_present || adb_present ;; esac; }
-    _here && return 0
+    if _here; then device_card; return 0; fi
     [ "$USB_MODE" = termux ] && chk=20
     echo -e " ${GRAY}${tip}\n Press 0 or q to go back.${RESET}\n"
     printf '\033[?25l'
@@ -159,8 +186,7 @@ wait_for_device() {
         else sleep 0.2; fi
         if [ $((i % chk)) -eq 0 ] && _here; then
             printf "\r\033[K\033[?25h"
-            [ "$mode" = fastboot ] && DEV_STATE=fastboot || DEV_STATE=adb
-            ok "Device found!"; sleep 0.4; return 0
+            device_card; sleep 0.6; return 0
         fi
     done
 }
