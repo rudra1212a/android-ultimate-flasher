@@ -7,15 +7,10 @@
 set -uo pipefail
 
 VERSION="1.1"
+TERMUX_PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 BASE_DIR="$HOME/.android-ultimate-flashing-tool"
 LOG_FILE="$BASE_DIR/tool.log"
 LAST_OUT="$BASE_DIR/last_output.txt"
-DL_DIR="$HOME/storage/downloads"
-
-if [ ! -d "$DL_DIR" ]; then
-    DL_DIR="$HOME/Download"
-    mkdir -p "$DL_DIR"
-fi
 
 mkdir -p "$BASE_DIR"
 touch "$LOG_FILE" "$LAST_OUT"
@@ -48,13 +43,51 @@ pause() {
     fi
 }
 
+# Downloads directory setup (Placed safely after 'warn' function)
+DL_DIR="$HOME/storage/downloads"
+if [ ! -d "$DL_DIR" ]; then
+    warn "Storage not linked. Run 'termux-setup-storage' if needed."
+    DL_DIR="$HOME/Download"
+    mkdir -p "$DL_DIR"
+fi
+
 check_tools() {
     for cmd in fastboot adb; do
         if ! command -v "$cmd" >/dev/null 2>&1; then
-            pkg update -y && pkg install -y android-tools >/dev/null 2>&1
+            warn "$cmd is not installed. Installing platform-tools..."
+            pkg update -y && pkg install -y android-tools >/dev/null 2>&1 || {
+                bad "Failed to install android-tools. Check internet connection."
+            }
             break
         fi
     done
+}
+
+check_fastboot_device() {
+    if ! fastboot devices 2>/dev/null | grep -q "fastboot"; then
+        bad "No fastboot device connected! Please connect phone in fastboot mode."
+        pause
+        return 1
+    fi
+    return 0
+}
+
+check_adb_device() {
+    if ! adb devices 2>/dev/null | grep -qE "(device|sideload)$"; then
+        bad "No ADB/Sideload device connected! Check USB debugging or recovery sideload mode."
+        pause
+        return 1
+    fi
+    return 0
+}
+
+check_sideload_device() {
+    if ! adb devices 2>/dev/null | grep -q "sideload$"; then
+        bad "Device not in sideload mode. Recovery > Apply update > ADB."
+        pause
+        return 1
+    fi
+    return 0
 }
 
 fb_var() {
@@ -71,6 +104,9 @@ fb_var() {
 flash_image_screen() {
     clear
     echo -e "\n=== Flash Individual Image (.img) ==="
+    
+    check_fastboot_device || return 1
+
     if [ ! -d "$DL_DIR" ]; then
         warn "Download directory not found."
         pause
@@ -100,6 +136,7 @@ flash_image_screen() {
 
     if [[ ! "$img_choice" =~ ^[0-9]+$ ]] || [ "$img_choice" -le 0 ] || [ "$img_choice" -gt "$count" ]; then
         say "Cancelled."
+        pause
         return 0
     fi
 
@@ -116,17 +153,46 @@ flash_image_screen() {
         return 1
     fi
 
+    printf "  Are you sure you want to flash [%s] to partition [%s]? (y/N): " "$(basename "$selected_img")" "$target_part"
+    read -r confirm
+    if [[ ! "$confirm" =~ ^[yY]$ ]]; then
+        say "Flashing cancelled."
+        pause
+        return 0
+    fi
+
+    if [[ "$target_part" == vbmeta* ]]; then
+        printf "  Do you want to disable verity and verification? (y/N): "
+        read -r vb_conf
+        if [[ "$vb_conf" =~ ^[yY]$ ]]; then
+            say "Flashing $target_part with disable flags..."
+            if fastboot --disable-verity --disable-verification flash "$target_part" "$selected_img" > "$LAST_OUT" 2>&1; then
+                ok "Vbmeta flashed successfully with disable flags!"
+            else
+                bad "Flashing failed! Last output:"
+                tail -n 5 "$LAST_OUT"
+            fi
+            pause
+            return 0
+        fi
+    fi
+
     say "Flashing to [$target_part]..."
     if fastboot flash "$target_part" "$selected_img" > "$LAST_OUT" 2>&1; then
         ok "Image flashed successfully!"
     else
-        bad "Flashing failed! Check last output."
+        bad "Flashing failed! Last output:"
+        tail -n 5 "$LAST_OUT"
     fi
     pause
 }
 
 flash_sideload_screen() {
+    clear
     echo -e "\n=== ADB Sideload Custom ROM ==="
+
+    check_sideload_device || return 1
+
     local count=0
     echo ""
     shopt -s nullglob
@@ -148,37 +214,55 @@ flash_sideload_screen() {
     printf "  Select zip file number to sideload (0 to cancel): "
     read -r zip_choice
 
-    if [[ ! "$zip_choice" =~ ^[0-9]+$ ]] || [ "$zip_choice" -le 0 ]] || [ "$zip_choice" -gt "$count" ]; then
+    if [[ ! "$zip_choice" =~ ^[0-9]+$ ]] || [ "$zip_choice" -le 0 ] || [ "$zip_choice" -gt "$count" ]; then
         say "Cancelled."
+        pause
         return 0
     fi
 
     local selected_zip="${zips[$((zip_choice - 1))]}"
     say "Starting ADB sideload for $(basename "$selected_zip")..."
     
-    if adb sideload "$selected_zip" > "$LAST_OUT" 2>&1; then
+    adb sideload "$selected_zip" 2>&1 | tee "$LAST_OUT"
+    local rc=${PIPESTATUS[0]}
+    if [ "$rc" -eq 0 ]; then
         ok "ADB sideload completed successfully!"
     else
-        bad "ADB sideload failed or interrupted."
+        warn "Exit code $rc. Check recovery screen; it may still have succeeded."
     fi
+    pause
+}
+
+flash_fastboot_screen() {
+    echo -e "\n=== Fastboot ROM Package Preview ==="
+    warn "Feature is under development."
+    pause
+}
+
+flash_gsi_screen() {
+    echo -e "\n=== Flash GSI (Generic System Image) ==="
+    warn "Feature is under development."
     pause
 }
 
 device_info_screen() {
     echo -e "\n=== Device Information & Status ==="
+    check_fastboot_device || return 1
     echo "------------------------------------------"
     echo " Product : $(fb_var product)"
     echo " Slot    : $(fb_var current-slot)"
-    echo " Locked  : $(fb_var unlocked)"
+    echo " Unlocked: $(fb_var unlocked)"
     echo "------------------------------------------"
     pause
 }
 
 switch_slot_screen() {
     echo -e "\n=== Switch A/B Slot ==="
+    check_fastboot_device || return 1
     printf "  Enter target slot to switch (a or b): "
     read -r slot
-    if [[ "$slot" =~ ^[abAB]$ ]]; then
+    slot="${slot,,}"
+    if [[ "$slot" =~ ^[ab]$ ]]; then
         say "Switching to slot $slot..."
         if fastboot set_active "$slot" > "$LAST_OUT" 2>&1; then
             ok "Successfully switched to slot $slot."
@@ -200,9 +284,42 @@ reboot_screen() {
     printf " Select mode: "
     read -r r_opt
     case "${r_opt:-}" in
-        1) fastboot reboot || adb reboot; say "Rebooting..." ;;
-        2) fastboot reboot recovery || adb reboot recovery; say "Rebooting to recovery..." ;;
-        3) fastboot reboot bootloader || adb reboot bootloader; say "Rebooting to bootloader..." ;;
+        1) 
+           if fastboot devices 2>/dev/null | grep -q "fastboot"; then
+               fastboot reboot || { bad "Reboot failed."; pause; return; }
+           elif adb devices 2>/dev/null | grep -qE "(device|sideload)$"; then
+               adb reboot || { bad "Reboot failed."; pause; return; }
+           else
+               bad "No device connected to reboot."
+               pause
+               return
+           fi
+           say "Rebooting..." 
+           ;;
+        2) 
+           if fastboot devices 2>/dev/null | grep -q "fastboot"; then
+               fastboot reboot recovery || { bad "Reboot failed."; pause; return; }
+           elif adb devices 2>/dev/null | grep -qE "(device|sideload)$"; then
+               adb reboot recovery || { bad "Reboot failed."; pause; return; }
+           else
+               bad "No device connected."
+               pause
+               return
+           fi
+           say "Rebooting to recovery..." 
+           ;;
+        3) 
+           if fastboot devices 2>/dev/null | grep -q "fastboot"; then
+               fastboot reboot bootloader || { bad "Reboot failed."; pause; return; }
+           elif adb devices 2>/dev/null | grep -qE "(device|sideload)$"; then
+               adb reboot bootloader || { bad "Reboot failed."; pause; return; }
+           else
+               bad "No device connected."
+               pause
+               return
+           fi
+           say "Rebooting to bootloader..." 
+           ;;
         *) say "Cancelled." ;;
     esac
     pause
@@ -210,15 +327,21 @@ reboot_screen() {
 
 wipe_data_screen() {
     echo -e "\n=== Factory Reset / Wipe Data ==="
+    check_fastboot_device || return 1
     warn "WARNING: This will erase all personal data!"
     printf "  Type 'WIPE' to confirm: "
     read -r confirm
     if [ "$confirm" = "WIPE" ]; then
         say "Wiping user data..."
         if fastboot -w > "$LAST_OUT" 2>&1; then
-            ok "User data wiped successfully."
+            ok "Data wiped successfully."
         else
-            bad "Wipe operation failed."
+            warn "Standard wipe failed, trying manual userdata/metadata erase..."
+            if fastboot erase userdata > "$LAST_OUT" 2>&1 && fastboot erase metadata >> "$LAST_OUT" 2>&1; then
+                ok "Manual data erase completed successfully."
+            else
+                bad "Wipe operation failed completely."
+            fi
         fi
     else
         say "Wipe cancelled."
@@ -237,7 +360,7 @@ main_menu() {
         fi
 
         local adb_dot="${RED}●${RESET}"
-        if adb devices 2>/dev/null | grep -q "device$"; then
+        if adb devices 2>/dev/null | grep -qE "(device|sideload)$"; then
             adb_dot="${GREEN}●${RESET}"
         fi
 
@@ -247,19 +370,19 @@ main_menu() {
         fi
 
         local dev_text="${RED}Not connected${RESET}"
-        if fastboot devices 2>/dev/null | grep -q "fastboot" || adb devices 2>/dev/null | grep -q "device$"; then
+        if fastboot devices 2>/dev/null | grep -q "fastboot" || adb devices 2>/dev/null | grep -qE "(device|sideload)$"; then
             dev_text="${GREEN}Connected${RESET}"
         fi
 
         local file_count=0
         if [ -d "$DL_DIR" ]; then
-            file_count=$(find "$DL_DIR" -mindepth 1 -maxdepth 1 \( -name "*.img" -o -name "*.zip" -o -type d \) 2>/dev/null | wc -l)
+            file_count=$(find "$DL_DIR" -mindepth 1 -maxdepth 1 \( -name "*.img" -o -name "*.zip" \) -type f 2>/dev/null | wc -l)
         fi
 
-        echo -e "${GREEN}┌──────────────────────────────────────────────────┐${RESET}"
-        echo -e "${GREEN}│${RESET}             ANDROID ULTIMATE FLASHER             ${GREEN}│${RESET}"
-        echo -e "${GREEN}│${RESET}        Version 1.1  •  Crafted by Rudra          ${GREEN}│${RESET}"
-        echo -e "${GREEN}┌──────────────────────────────────────────────────┐${RESET}" | sed 's/┌/└/;s/┐/┘/'
+        echo -e "${GREEN}+------------------------------------------+${RESET}"
+        echo -e "${GREEN}|${RESET}         ANDROID ULTIMATE FLASHER         ${GREEN}|${RESET}"
+        echo -e "${GREEN}|${RESET}        Version ${VERSION}  •  By Rudra          ${GREEN}|${RESET}"
+        echo -e "${GREEN}+------------------------------------------+${RESET}"
         echo ""
         echo -e " Tools    $fb_dot fastboot   $adb_dot adb   $py_dot python"
         echo -e " Device   $dev_text"
@@ -281,15 +404,15 @@ main_menu() {
         echo -e " ${GREEN}●${RESET} Safe    ${YELLOW}●${RESET} Careful    ${RED}●${RESET} Erases data"
         echo ""
         printf " Select: "
-        read -r opt
+        read -r opt || exit 0
 
         case "${opt:-}" in
             1) flash_image_screen ;;
             2) flash_sideload_screen ;;
-            3) flash_image_screen ;; # Quick placeholder or fastboot rom view
-            4) device_info_screen ;;
-            5) switch_slot_screen ;;
-            6) reboot_screen ;;
+            3) flash_fastboot_screen ;;
+            4) flash_gsi_screen ;;
+            5) device_info_screen ;;
+            6) switch_slot_screen ;;
             7) reboot_screen ;;
             8) wipe_data_screen ;;
             0) 
@@ -305,15 +428,22 @@ main_menu() {
 }
 
 install_tool() {
-    mkdir -p "$BASE_DIR"
-    if [ -f "$0" ]; then
-        cp "$0" "$BASE_DIR/setup.sh"
-    fi
-    chmod +x "$BASE_DIR/setup.sh"
+    mkdir -p "$BASE_DIR" "$TERMUX_PREFIX/bin"
     
-    mkdir -p "$PREFIX/bin"
-    ln -sf "$BASE_DIR/setup.sh" "$PREFIX/bin/rudra"
-    chmod +x "$PREFIX/bin/rudra"
+    local self target
+    self="$(realpath "$0" 2>/dev/null)"
+    target="$(realpath "$BASE_DIR/setup.sh" 2>/dev/null)"
+    
+    if [ -f "$0" ] && [ "$self" != "$target" ]; then
+        cp "$0" "$BASE_DIR/setup.sh" 2>/dev/null || true
+    fi
+    
+    [ -f "$BASE_DIR/setup.sh" ] || cp "$0" "$BASE_DIR/setup.sh" 2>/dev/null || true
+    [ -f "$BASE_DIR/setup.sh" ] || return 0
+    
+    chmod +x "$BASE_DIR/setup.sh" 2>/dev/null || true
+    ln -sf "$BASE_DIR/setup.sh" "$TERMUX_PREFIX/bin/rudra"
+    chmod +x "$TERMUX_PREFIX/bin/rudra" 2>/dev/null || true
 }
 
 install_tool
