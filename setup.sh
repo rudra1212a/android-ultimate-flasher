@@ -1,43 +1,40 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Script Name: Android Ultimate Flasher (Classic UI & Secured Edition)
+# Script Name: Android Ultimate Flasher (Optimized & Stable Edition)
 # Description: Professional Android flashing tool for Termux
 # ==============================================================================
 
 set -uo pipefail
 
 # --- Configuration & Constants ---
-VERSION="1.1"
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+VERSION="1.2"
 readonly BASE_DIR="$HOME/.android-ultimate-flashing-tool"
 readonly LOG_FILE="$BASE_DIR/tool.log"
 readonly LAST_OUT="$BASE_DIR/last_output.txt"
-readonly DL_DIR="$HOME/Download"
+readonly DL_DIR="$HOME/storage/downloads"
 
-# UI Colors & Styles
-if [ -t 1 ] && [ "${NO_COLOR:-0}" = "0" ]; then
-    readonly RED='\033[1;31m'
-    readonly GREEN='\033[1;32m'
-    readonly YELLOW='\033[1;33m'
-    readonly BLUE='\033[1;34m'
-    readonly CYAN='\033[1;36m'
-    readonly GRAY='\033[1;90m'
-    readonly RESET='\033[0m'
-else
-    readonly RED='' readonly GREEN='' readonly YELLOW='' readonly BLUE='' readonly CYAN='' readonly GRAY='' readonly RESET=''
+# Fallback to standard download dir if storage is not linked
+if [ ! -d "$DL_DIR" ]; then
+    DL_DIR="$HOME/Download"
+    mkdir -p "$DL_DIR"
 fi
 
-# Initialize Environment
-mkdir -p "$BASE_DIR" "$DL_DIR"
-touch "$LOG_FILE" "$LAST_OUT"
-chmod 600 "$LOG_FILE" "$LAST_OUT"
+# UI Colors
+RED='\033[1;31m'
+GREEN='\033[1;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[1;34m'
+CYAN='\033[1;36m'
+GRAY='\033[1;90m'
+RESET='\033[0m'
 
-# --- Logging & Output Functions ---
+mkdir -p "$BASE_DIR"
+touch "$LOG_FILE" "$LAST_OUT"
+
 log() {
     local level="${1:-INFO}"
     shift || true
-    local msg="[$(date '+%Y-%m-%d %H:%M:%S')] [$level] $*"
-    echo -e "$msg" >> "$LOG_FILE"
+    echo -e "[$(date '+%Y-%m-%d %H:%M:%S')] [$level] $*" >> "$LOG_FILE"
 }
 
 say()  { echo -e "${BLUE}[*]${RESET} $*"; log "INFO" "$*"; }
@@ -45,89 +42,43 @@ ok()   { echo -e "${GREEN}[+]${RESET} $*"; log "SUCCESS" "$*"; }
 warn() { echo -e "${YELLOW}[!]${RESET} $*"; log "WARN" "$*"; }
 bad()  { echo -e "${RED}[-]${RESET} $*"; log "ERROR" "$*"; }
 
-# --- Timeout Helper ---
-HAS_TIMEOUT=0
-command -v timeout >/dev/null 2>&1 && HAS_TIMEOUT=1
-
-run_t() {
-    local timeout_sec="$1"
-    shift
-    if [ "$HAS_TIMEOUT" = 1 ]; then
-        timeout "$timeout_sec" "$@"
-    else
-        "$@"
-    fi
+pause() {
+    echo -e ""
+    read -n 1 -s -r -p "Press any key to continue..."
+    echo -e ""
 }
 
-# --- Device Detection & Fastboot Helpers ---
+check_tools() {
+    for cmd in fastboot adb; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            warn "$cmd is not installed. Installing platform-tools..."
+            pkg update -y && pkg install -y android-tools
+            break
+        fi
+    done
+}
+
 fb_var() {
     local var_name="${1:-}"
-    local output
-    output=$(run_t 8 fastboot getvar "$var_name" 2>&1 | tr -d '\r')
     local val
-    val=$(echo "$output" | awk -F': *' -v k="$var_name" '{
-        sub(/^\(bootloader\)[[:space:]]*/, "", $1);
-        if ($1 == k && NF >= 2) { print $2; exit }
-    }')
+    val=$(fastboot getvar "$var_name" 2>&1 | grep -i "$var_name" | head -n1 | awk '{print $2}')
     if [ -z "$val" ]; then
         echo "UNKNOWN"
-        return 1
-    fi
-    echo "$val"
-    return 0
-}
-
-bootloader_gate() {
-    say "Verifying bootloader lock status..."
-    local u="UNKNOWN"
-    u="$(fb_var unlocked || echo "UNKNOWN")"
-    if [[ "${u,,}" =~ ^(yes|true|1)$ ]]; then
-        ok "Bootloader is verified as UNLOCKED."
-        return 0
     else
-        bad "Bootloader is LOCKED or status could not be verified ($u). Operation cancelled."
-        return 1
+        echo "$val" | tr -d '\r'
     fi
 }
 
-device_identity_gate() {
-    local expected_model="${1:-}"
-    say "Checking connected device identity..."
-    
-    if ! command -v fastboot >/dev/null 2>&1; then
-        bad "Fastboot command not found."
-        return 1
-    fi
-
-    local current_product="UNKNOWN"
-    current_product="$(fb_var product || echo "UNKNOWN")"
-    say "Detected Device Product: $current_product"
-
-    if [ -n "$expected_model" ]; then
-        if [ "$current_product" != "$expected_model" ]; then
-            bad "Model Mismatch! Expected: '$expected_model', Connected: '$current_product'. Operation aborted."
-            return 1
-        else
-            ok "Device model matches expected firmware package."
-        fi
-    fi
-    return 0
-}
-
-pause() {
-    if [ -t 0 ]; then
-        printf '\n  %sPress Enter to continue%s ' "$GRAY" "$RESET"
-        read -r _ || true
-    fi
-}
-
-# --- Feature Screens ---
 flash_image_screen() {
-    echo -e "\n=== Flash Individual Image (.img) ==="
+    clear
+    echo "=========================================="
+    echo "         FLASH INDIVIDUAL IMAGE (.IMG)    "
+    echo "=========================================="
+    
     if [ ! -d "$DL_DIR" ]; then
-        warn "Download directory not found."
+        warn "Download folder not found: $DL_DIR"
         pause
-        return 1
+        return
     fi
 
     local count=0
@@ -143,50 +94,48 @@ flash_image_screen() {
     done
 
     if [ "$count" -eq 0 ]; then
-        warn "No .img files found in $DL_DIR."
+        warn "No .img files found in Downloads folder."
         pause
-        return 1
+        return
     fi
 
-    printf "  Select image number to flash (0 to cancel): "
+    echo ""
+    printf "Select image number (0 to cancel): "
     read -r img_choice
 
     if [[ ! "$img_choice" =~ ^[0-9]+$ ]] || [ "$img_choice" -le 0 ] || [ "$img_choice" -gt "$count" ]; then
         say "Cancelled."
-        return 0
+        pause
+        return
     fi
 
     local selected_img="${imgs[$((img_choice - 1))]}"
-    say "Selected Image: $(basename "$selected_img")"
+    say "Selected: $(basename "$selected_img")"
     
-    echo "  Common Partitions: boot, recovery, vbmeta, dtbo, vendor_boot"
-    printf "  Enter target partition name: "
+    echo "Common partitions: boot, recovery, vbmeta, dtbo"
+    printf "Enter target partition name: "
     read -r target_part
 
     if [ -z "$target_part" ]; then
         bad "Partition name cannot be empty."
         pause
-        return 1
+        return
     fi
 
-    if bootloader_gate; then
-        say "Flashing $(basename "$selected_img") to partition [$target_part]..."
-        if fastboot flash "$target_part" "$selected_img" > "$LAST_OUT" 2>&1; then
-            ok "Image flashed successfully!"
-        else
-            bad "Flashing failed! Check last output for details."
-        fi
+    say "Flashing to [$target_part]..."
+    if fastboot flash "$target_part" "$selected_img" > "$LAST_OUT" 2>&1; then
+        ok "Flashed successfully!"
+    else
+        bad "Flashing failed! Check last_output.txt for details."
     fi
     pause
 }
 
 flash_sideload_screen() {
-    echo -e "\n=== ADB Sideload Custom ROM ==="
-    if ! command -v adb >/dev/null 2>&1; then
-        bad "ADB command not found."
-        pause
-        return 1
-    fi
+    clear
+    echo "=========================================="
+    echo "          ADB SIDELOAD CUSTOM ROM         "
+    echo "=========================================="
 
     local count=0
     echo ""
@@ -201,98 +150,79 @@ flash_sideload_screen() {
     done
 
     if [ "$count" -eq 0 ]; then
-        warn "No .zip files found in $DL_DIR."
+        warn "No .zip files found in Downloads."
         pause
-        return 1
+        return
     fi
 
-    printf "  Select zip file number to sideload (0 to cancel): "
+    echo ""
+    printf "Select zip number to sideload (0 to cancel): "
     read -r zip_choice
 
     if [[ ! "$zip_choice" =~ ^[0-9]+$ ]] || [ "$zip_choice" -le 0 ] || [ "$zip_choice" -gt "$count" ]; then
         say "Cancelled."
-        return 0
+        pause
+        return
     fi
 
     local selected_zip="${zips[$((zip_choice - 1))]}"
-    say "Starting ADB sideload for $(basename "$selected_zip")..."
+    say "Starting sideload for $(basename "$selected_zip")..."
     
     if adb sideload "$selected_zip" > "$LAST_OUT" 2>&1; then
         ok "ADB sideload completed successfully!"
     else
-        bad "ADB sideload failed or interrupted."
+        bad "ADB sideload failed."
     fi
     pause
 }
 
-flash_fastboot_screen() {
-    echo -e "\n=== Fastboot ROM Package Preview ==="
-    say "Scanning $DL_DIR for extracted ROM folders..."
-    local count=0
+device_info_screen() {
+    clear
+    echo "=========================================="
+    echo "            DEVICE INFORMATION            "
+    echo "=========================================="
     echo ""
-    shopt -s nullglob
-    for d in "$DL_DIR"/*/; do
-        if [ -d "$d" ]; then
-            echo "  [$((++count))] $(basename "$d")"
-        fi
-    done
-    shopt -u nullglob
-
-    if [ "$count" -eq 0 ]; then
-        warn "No extracted packages found."
-    fi
+    say "Fetching device variables..."
+    echo "------------------------------------------"
+    echo " Product : $(fb_var product)"
+    echo " Slot    : $(fb_var current-slot)"
+    echo " Locked  : $(fb_var unlocked)"
+    echo "------------------------------------------"
     pause
 }
 
 switch_slot_screen() {
-    echo -e "\n=== Switch A/B Slot ==="
-    if bootloader_gate; then
-        local current_slot
-        current_slot="$(fb_var current-slot || echo "UNKNOWN")"
-        say "Current Active Slot: $current_slot"
-        printf "  Enter target slot to switch (a or b): "
-        read -r slot
-        if [[ "$slot" =~ ^[abAB]$ ]]; then
-            say "Switching to slot $slot..."
-            if fastboot set_active "$slot" > "$LAST_OUT" 2>&1; then
-                ok "Successfully switched to slot $slot."
-            else
-                bad "Failed to switch slot."
-            fi
+    clear
+    echo "=========================================="
+    echo "             SWITCH A/B SLOT              "
+    echo "=========================================="
+    echo ""
+    printf "Enter target slot (a or b): "
+    read -r slot
+    if [[ "$slot" =~ ^[abAB]$ ]]; then
+        say "Switching to slot $slot..."
+        if fastboot set_active "$slot" > "$LAST_OUT" 2>&1; then
+            ok "Successfully switched to slot $slot."
         else
-            bad "Invalid slot choice."
-        fi
-    fi
-    pause
-}
-
-wipe_data_screen() {
-    echo -e "\n=== Factory Reset / Wipe Data ==="
-    warn "WARNING: This will erase all personal data!"
-    printf "  Type 'WIPE' to confirm: "
-    read -r confirm
-    if [ "$confirm" = "WIPE" ]; then
-        if bootloader_gate; then
-            say "Wiping user data..."
-            if fastboot -w > "$LAST_OUT" 2>&1; then
-                ok "User data wiped successfully."
-            else
-                bad "Wipe operation failed."
-            fi
+            bad "Failed to switch slot."
         fi
     else
-        say "Wipe cancelled."
+        bad "Invalid slot choice."
     fi
     pause
 }
 
 reboot_screen() {
-    echo -e "\n=== Reboot Options ==="
+    clear
+    echo "=========================================="
+    echo "              REBOOT OPTIONS              "
+    echo "=========================================="
     echo " 1) Reboot to System"
     echo " 2) Reboot to Recovery"
     echo " 3) Reboot to Bootloader"
     echo " 0) Back"
-    printf " Select mode: "
+    echo ""
+    printf "Select option: "
     read -r r_opt
     case "${r_opt:-}" in
         1) fastboot reboot || adb reboot; say "Rebooting..." ;;
@@ -303,83 +233,100 @@ reboot_screen() {
     pause
 }
 
-# --- Main Menu ---
+wipe_data_screen() {
+    clear
+    echo "=========================================="
+    echo "           FACTORY RESET / WIPE           "
+    echo "=========================================="
+    warn "WARNING: This will erase all user data!"
+    printf "Type 'WIPE' to confirm: "
+    read -r confirm
+    if [ "$confirm" = "WIPE" ]; then
+        say "Wiping user data..."
+        if fastboot -w > "$LAST_OUT" 2>&1; then
+            ok "Data wiped successfully."
+        else
+            bad "Wipe failed."
+        fi
+    else
+        say "Wipe cancelled."
+    fi
+    pause
+}
+
+# --- Main Menu Loop ---
 main_menu() {
+    check_tools
     while true; do
         clear
         
-        local fb_dot="${RED}●${RESET}"
-        command -v fastboot >/dev/null 2>&1 && fb_dot="${GREEN}●${RESET}"
-
-        local adb_dot="${RED}●${RESET}"
-        command -v adb >/dev/null 2>&1 && adb_dot="${GREEN}●${RESET}"
-
-        local py_dot="${RED}●${RESET}"
-        command -v python3 >/dev/null 2>&1 && py_dot="${GREEN}●${RESET}"
-
-        local dev_text="${RED}Not connected${RESET}"
-        if fastboot devices 2>/dev/null | grep -q "fastboot" || adb devices 2>/dev/null | grep -q "device$"; then
-            dev_text="${GREEN}Connected${RESET}"
+        local fb_status="${RED}Disconnected${RESET}"
+        if fastboot devices 2>/dev/null | grep -q "fastboot"; then
+            fb_status="${GREEN}Connected${RESET}"
         fi
 
-        local file_count=0
-        if [ -d "$DL_DIR" ]; then
-            file_count=$(find "$DL_DIR" -mindepth 1 -maxdepth 1 \( -name "*.img" -o -name "*.zip" -o -type d \) | wc -l)
+        local adb_status="${RED}Disconnected${RESET}"
+        if adb devices 2>/dev/null | grep -q "device$"; then
+            adb_status="${GREEN}Connected${RESET}"
         fi
 
-        echo -e "${GREEN}┌──────────────────────────────────────────────────┐${RESET}"
-        echo -e "${GREEN}│${RESET}             ANDROID ULTIMATE FLASHER             ${GREEN}│${RESET}"
-        echo -e "${GREEN}│${RESET}        Version 1.1  •  Crafted by Rudra          ${GREEN}│${RESET}"
-        echo -e "${GREEN}┌──────────────────────────────────────────────────┐${RESET}" | sed 's/┌/└/;s/┐/┘/'
-        echo ""
-        echo -e " Tools    $fb_dot fastboot   $adb_dot adb   $py_dot python"
-        echo -e " Device   $dev_text"
-        echo -e " Files    $file_count in Downloads"
-        echo ""
-        echo -e " ${CYAN}- FLASH -${RESET}"
-        echo -e "  1 ${GREEN}●${RESET} Flash Image        boot / recovery .img"
-        echo -e "  2 ${GREEN}●${RESET} Custom ROM (ADB)   install .zip package"
-        echo -e "  3 ${YELLOW}●${RESET} Fastboot ROM       extract & flash pkg"
-        echo -e "  4 ${GREEN}●${RESET} Flash GSI          generic system image"
-        echo -e " ${CYAN}- DEVICE -${RESET}"
-        echo -e "  5 ${GREEN}●${RESET} Device Info        model, slot, lock"
-        echo -e "  6 ${GREEN}●${RESET} Switch Slot        active A/B slot"
-        echo -e "  7 ${GREEN}●${RESET} Reboot             restart to a mode"
-        echo -e "  8 ${RED}●${RESET} Erase Data         factory reset"
-        echo -e " ${CYAN}- EXIT -${RESET}"
-        echo -e "  0 ${GREEN}●${RESET} Exit               Quit application"
-        echo ""
-        echo -e " ${GREEN}●${RESET} Safe    ${YELLOW}●${RESET} Careful    ${RED}●${RESET} Erases data"
-        echo ""
-        printf " Select: "
+        echo "=========================================="
+        echo "        ANDROID ULTIMATE FLASHER          "
+        echo "        Version $VERSION • By Rudra         "
+        echo "=========================================="
+        echo " Fastboot : $fb_status"
+        echo " ADB      : $adb_status"
+        echo "=========================================="
+        echo " 1) Flash Image (.img)"
+        echo " 2) Custom ROM (ADB Sideload .zip)"
+        echo " 3) Device Information"
+        echo " 4) Switch A/B Slot"
+        echo " 5) Reboot Options"
+        echo " 6) Erase Data (Factory Reset)"
+        echo " 0) Exit"
+        echo "=========================================="
+        printf "Select option: "
         read -r opt
 
         case "${opt:-}" in
             1) flash_image_screen ;;
             2) flash_sideload_screen ;;
-            3) flash_fastboot_screen ;;
-            4) 
-               echo -e "\n=== Device Information & Status ==="
-               if bootloader_gate; then
-                   device_identity_gate
-               fi
-               pause
-               ;;
-            5) switch_slot_screen ;;
+            3) device_info_screen ;;
+            4) switch_slot_screen ;;
+            5) reboot_screen ;;
             6) wipe_data_screen ;;
-            7) reboot_screen ;;
-            8) wipe_data_screen ;;
             0) 
                say "Exiting tool safely."
-               return 0 2>/dev/null || exit 0
+               exit 0
                ;;
             *) 
                bad "Invalid option."
-               sleep 1 
+               sleep 1
                ;;
         esac
     done
 }
+
+# --- Self-Installation / Shortcut Setup ---
+install_tool() {
+    local target_dir="$HOME/.android-ultimate-flashing-tool"
+    mkdir -p "$target_dir"
+    
+    # Copy current script to target directory if executed via bash <(...) or clone
+    if [ -f "$0" ]; then
+        cp "$0" "$target_dir/setup.sh"
+    fi
+    
+    chmod +x "$target_dir/setup.sh"
+    
+    # Create persistent global symlink in termux bin
+    mkdir -p "$PREFIX/bin"
+    ln -sf "$target_dir/setup.sh" "$PREFIX/bin/rudra"
+    chmod +x "$PREFIX/bin/rudra"
+}
+
+# Run installation setup on first execution
+install_tool
 
 if [[ "${BASH_SOURCE[0]:-$0}" == "$0" ]]; then
     main_menu
