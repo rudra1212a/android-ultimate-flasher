@@ -134,7 +134,8 @@ flash_image_screen() {
     printf "  Select image number to flash (0 to cancel): "
     read -r img_choice
 
-    if [[ ! "$img_choice" =~ ^[0-9]+$ ]] || [ "$img_choice" -le 0 ]] || [ "$img_choice" -gt "$count" ]; then
+    # Fixed: Removed extra ']'
+    if [[ ! "$img_choice" =~ ^[0-9]+$ ]] || [ "$img_choice" -le 0 ] || [ "$img_choice" -gt "$count" ]; then
         say "Cancelled."
         pause
         return 0
@@ -214,7 +215,8 @@ flash_sideload_screen() {
     printf "  Select zip file number to sideload (0 to cancel): "
     read -r zip_choice
 
-    if [[ ! "$zip_choice" =~ ^[0-9]+$ ]] || [ "$zip_choice" -le 0 ]] || [ "$zip_choice" -gt "$count" ]; then
+    # Fixed: Removed extra ']'
+    if [[ ! "$zip_choice" =~ ^[0-9]+$ ]] || [ "$zip_choice" -le 0 ] || [ "$zip_choice" -gt "$count" ]; then
         say "Cancelled."
         pause
         return 0
@@ -381,7 +383,8 @@ main_menu() {
 
         echo -e "${GREEN}+------------------------------------+${RESET}"
         echo -e "${GREEN}|${RESET}      ANDROID ULTIMATE FLASHER      ${GREEN}|${RESET}"
-        echo -e "${GREEN}|${RESET}   Version ${VERSION} • Created by Rudra  ${GREEN}|${RESET}"
+        # Fixed: Added extra space at the end for perfect right-border alignment
+        echo -e "${GREEN}|${RESET}   Version ${VERSION} • Created by Rudra   ${GREEN}|${RESET}"
         echo -e "${GREEN}+------------------------------------+${RESET}"
         echo ""
         echo -e " Tools    $fb_dot fastboot   $adb_dot adb   $py_dot python"
