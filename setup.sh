@@ -379,10 +379,10 @@ main_menu() {
             file_count=$(find "$DL_DIR" -mindepth 1 -maxdepth 1 \( -name "*.img" -o -name "*.zip" \) -type f 2>/dev/null | wc -l)
         fi
 
-        echo -e "${GREEN}+------------------------------------------+${RESET}"
-        echo -e "${GREEN}|${RESET}         ANDROID ULTIMATE FLASHER         ${GREEN}|${RESET}"
-        echo -e "${GREEN}|${RESET}        Version ${VERSION}  •  By Rudra          ${GREEN}|${RESET}"
-        echo -e "${GREEN}+------------------------------------------+${RESET}"
+        echo -e "${GREEN}+------------------------------------+${RESET}"
+        echo -e "${GREEN}|${RESET}      ANDROID ULTIMATE FLASHER      ${GREEN}|${RESET}"
+        echo -e "${GREEN}|${RESET}   Version ${VERSION} • Created by Rudra  ${GREEN}|${RESET}"
+        echo -e "${GREEN}+------------------------------------+${RESET}"
         echo ""
         echo -e " Tools    $fb_dot fastboot   $adb_dot adb   $py_dot python"
         echo -e " Device   $dev_text"
