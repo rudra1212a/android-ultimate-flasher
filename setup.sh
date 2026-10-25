@@ -357,6 +357,52 @@ run_step() {
 }
 
 # ------------------------------ 1. Flash Image --------------------------------
+# Two steps: 1) choose the FOLDER, 2) choose the image inside it  -> PICKED
+is_rom_dir() { # ROM folder or its images folder
+    local d="$1"
+    compgen -G "$d/flash_all*.sh" >/dev/null 2>&1 && return 0
+    [ "$(basename "$d")" = images ] && compgen -G "$(dirname "$d")/flash_all*.sh" >/dev/null 2>&1 && return 0
+    return 1
+}
+pick_image() {
+    local alld=() plain=() roms=() dirs=() d f n lbl
+    mapfile -t alld < <(scan_list '\.img$' | while IFS= read -r f; do dirname "$f"; done | sort -u)
+    if [ "${#alld[@]}" -eq 0 ] || [ -z "${alld[0]:-}" ]; then
+        warn "No image (.img) found on your phone."
+        echo -e " ${GRAY}Copy it to the phone, then press 'r' in the main menu.${RESET}"
+        return 1
+    fi
+    for d in "${alld[@]}"; do if is_rom_dir "$d"; then roms+=("$d"); else plain+=("$d"); fi; done
+    dirs=("${plain[@]}" "${roms[@]}")
+
+    local files=() fl
+    while true; do
+        d=""
+        if [ "${#dirs[@]}" -eq 1 ]; then d="${dirs[0]}"; else
+            LIST=()
+            for f in "${dirs[@]}"; do
+                n=$(find "$f" -maxdepth 1 -type f -iname '*.img' 2>/dev/null | grep -c .)
+                if is_rom_dir "$f"; then
+                    if [ "$(basename "$f")" = images ]; then lbl="${CYAN}ROM${RESET} $(shorten "$(basename "$(dirname "$f")")" $((COLS - 26)))"
+                    else lbl="${CYAN}ROM${RESET} $(shorten "$(basename "$f")" $((COLS - 26)))"; fi
+                elif [ "$f" = "$STORAGE_ROOT" ]; then lbl="(phone storage)"
+                else lbl="$(shorten "${f#"$STORAGE_ROOT"/}" $((COLS - 22)))"; fi
+                LIST+=("$lbl ${GRAY}(${n} img)${RESET}")
+            done
+            echo -e " ${CYAN}Choose the folder:${RESET}\n"
+            pick_index "Select folder" || return 1
+            d="${dirs[$IDX]}"
+        fi
+        mapfile -t files < <(find "$d" -maxdepth 1 -type f -iname '*.img' | sort)
+        LIST=()
+        for f in "${files[@]}"; do LIST+=("${GRAY}$(printf '%6s' "$(human_size "$f")")${RESET} $(shorten "$(basename "$f")" $((COLS - 16)))"); done
+        echo -e "\n ${CYAN}Images in:${RESET} ${GRAY}$(shorten "${d#"$STORAGE_ROOT"/}" $((COLS - 14)))${RESET}\n"
+        if pick_index "Select image"; then PICKED="${files[$IDX]}"; return 0; fi
+        [ "${#dirs[@]}" -eq 1 ] && return 1
+        echo
+    done
+}
+
 CRITICAL="bootloader|xbl|xbl_config|abl|modem|persist|efs|modemst1|modemst2|fsg|sbl1|tz|aboot|rpm|hyp|devcfg|keymaster|preloader|lk|nvram|nvdata|proinfo|protect1|protect2|seccfg"
 PARTS=(boot recovery vendor_boot init_boot dtbo vbmeta vbmeta_system vbmeta_vendor logo super)
 SKIP_PARTS="userdata|metadata|cache|misc|frp|sdcard"
@@ -375,7 +421,7 @@ read_partitions() {
 flash_image_screen() {
     header "Flash Individual Image"
     refresh_scan; echo ""
-    pick_file "Select image number" '\.img$' || { say "Cancelled."; pause; return 0; }
+    pick_image || { say "Cancelled."; pause; return 0; }
     local img="$PICKED" guess part="" p i=0 def=0 sel
     [ -s "$img" ] || { bad "Image file is empty."; pause; return 1; }
     guess="$(basename "$img")"; guess="${guess%.*}"; guess="${guess,,}"
