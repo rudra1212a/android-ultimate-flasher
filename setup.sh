@@ -1,51 +1,48 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Script Name: Android Ultimate Flasher (Optimized & Stable Edition)
+# Script Name: Android Ultimate Flasher (Fixed & Stable Edition)
 # Description: Professional Android flashing tool for Termux
 # ==============================================================================
 
 set -uo pipefail
 
-# --- Configuration & Constants ---
-VERSION="1.2"
-readonly BASE_DIR="$HOME/.android-ultimate-flashing-tool"
-readonly LOG_FILE="$BASE_DIR/tool.log"
-readonly LAST_OUT="$BASE_DIR/last_output.txt"
-readonly DL_DIR="$HOME/storage/downloads"
+VERSION="1.3"
+BASE_DIR="$HOME/.android-ultimate-flashing-tool"
+LOG_FILE="$BASE_DIR/tool.log"
+LAST_OUT="$BASE_DIR/last_output.txt"
+DL_DIR="$HOME/storage/downloads"
 
-# Fallback to standard download dir if storage is not linked
 if [ ! -d "$DL_DIR" ]; then
     DL_DIR="$HOME/Download"
     mkdir -p "$DL_DIR"
 fi
 
-# UI Colors
+mkdir -p "$BASE_DIR"
+touch "$LOG_FILE" "$LAST_OUT"
+
+# Safe color variables using printf-compatible definitions
 RED='\033[1;31m'
 GREEN='\033[1;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[1;34m'
 CYAN='\033[1;36m'
-GRAY='\033[1;90m'
 RESET='\033[0m'
-
-mkdir -p "$BASE_DIR"
-touch "$LOG_FILE" "$LAST_OUT"
 
 log() {
     local level="${1:-INFO}"
     shift || true
-    echo -e "[$(date '+%Y-%m-%d %H:%M:%S')] [$level] $*" >> "$LOG_FILE"
+    printf "[%s] [%s] %s\n" "$(date '+%Y-%m-%d %H:%M:%S')" "$level" "$*" >> "$LOG_FILE"
 }
 
-say()  { echo -e "${BLUE}[*]${RESET} $*"; log "INFO" "$*"; }
-ok()   { echo -e "${GREEN}[+]${RESET} $*"; log "SUCCESS" "$*"; }
-warn() { echo -e "${YELLOW}[!]${RESET} $*"; log "WARN" "$*"; }
-bad()  { echo -e "${RED}[-]${RESET} $*"; log "ERROR" "$*"; }
+say()  { printf "${BLUE}[*]${RESET} %s\n" "$*"; log "INFO" "$*"; }
+ok()   { printf "${GREEN}[+]${RESET} %s\n" "$*"; log "SUCCESS" "$*"; }
+warn() { printf "${YELLOW}[!]${RESET} %s\n" "$*"; log "WARN" "$*"; }
+bad()  { printf "${RED}[-]${RESET} %s\n" "$*"; log "ERROR" "$*"; }
 
 pause() {
-    echo -e ""
+    printf "\n"
     read -n 1 -s -r -p "Press any key to continue..."
-    echo -e ""
+    printf "\n"
 }
 
 check_tools() {
@@ -63,17 +60,17 @@ fb_var() {
     local val
     val=$(fastboot getvar "$var_name" 2>&1 | grep -i "$var_name" | head -n1 | awk '{print $2}')
     if [ -z "$val" ]; then
-        echo "UNKNOWN"
+        printf "UNKNOWN"
     else
-        echo "$val" | tr -d '\r'
+        printf "%s" "$val" | tr -d '\r'
     fi
 }
 
 flash_image_screen() {
     clear
-    echo "=========================================="
-    echo "         FLASH INDIVIDUAL IMAGE (.IMG)    "
-    echo "=========================================="
+    printf "==========================================\n"
+    printf "         FLASH INDIVIDUAL IMAGE (.IMG)    \n"
+    printf "==========================================\n"
     
     if [ ! -d "$DL_DIR" ]; then
         warn "Download folder not found: $DL_DIR"
@@ -82,14 +79,15 @@ flash_image_screen() {
     fi
 
     local count=0
-    echo ""
+    printf "\n"
     shopt -s nullglob
     local imgs=("$DL_DIR"/*.img)
     shopt -u nullglob
 
     for img in "${imgs[@]}"; do
         if [ -f "$img" ]; then
-            echo "  [$((++count))] $(basename "$img")"
+            count=$((count + 1))
+            printf "  [%d] %s\n" "$count" "$(basename "$img")"
         fi
     done
 
@@ -99,8 +97,7 @@ flash_image_screen() {
         return
     fi
 
-    echo ""
-    printf "Select image number (0 to cancel): "
+    printf "\nSelect image number (0 to cancel): "
     read -r img_choice
 
     if [[ ! "$img_choice" =~ ^[0-9]+$ ]] || [ "$img_choice" -le 0 ] || [ "$img_choice" -gt "$count" ]; then
@@ -112,7 +109,7 @@ flash_image_screen() {
     local selected_img="${imgs[$((img_choice - 1))]}"
     say "Selected: $(basename "$selected_img")"
     
-    echo "Common partitions: boot, recovery, vbmeta, dtbo"
+    printf "Common partitions: boot, recovery, vbmeta, dtbo\n"
     printf "Enter target partition name: "
     read -r target_part
 
@@ -133,19 +130,20 @@ flash_image_screen() {
 
 flash_sideload_screen() {
     clear
-    echo "=========================================="
-    echo "          ADB SIDELOAD CUSTOM ROM         "
-    echo "=========================================="
+    printf "==========================================\n"
+    printf "          ADB SIDELOAD CUSTOM ROM         \n"
+    printf "==========================================\n"
 
     local count=0
-    echo ""
+    printf "\n"
     shopt -s nullglob
     local zips=("$DL_DIR"/*.zip)
     shopt -u nullglob
 
     for z in "${zips[@]}"; do
         if [ -f "$z" ]; then
-            echo "  [$((++count))] $(basename "$z")"
+            count=$((count + 1))
+            printf "  [%d] %s\n" "$count" "$(basename "$z")"
         fi
     done
 
@@ -155,8 +153,7 @@ flash_sideload_screen() {
         return
     fi
 
-    echo ""
-    printf "Select zip number to sideload (0 to cancel): "
+    printf "\nSelect zip number to sideload (0 to cancel): "
     read -r zip_choice
 
     if [[ ! "$zip_choice" =~ ^[0-9]+$ ]] || [ "$zip_choice" -le 0 ] || [ "$zip_choice" -gt "$count" ]; then
@@ -178,25 +175,23 @@ flash_sideload_screen() {
 
 device_info_screen() {
     clear
-    echo "=========================================="
-    echo "            DEVICE INFORMATION            "
-    echo "=========================================="
-    echo ""
+    printf "==========================================\n"
+    printf "            DEVICE INFORMATION            \n"
+    printf "==========================================\n\n"
     say "Fetching device variables..."
-    echo "------------------------------------------"
-    echo " Product : $(fb_var product)"
-    echo " Slot    : $(fb_var current-slot)"
-    echo " Locked  : $(fb_var unlocked)"
-    echo "------------------------------------------"
+    printf "------------------------------------------\n"
+    printf " Product : %s\n" "$(fb_var product)"
+    printf " Slot    : %s\n" "$(fb_var current-slot)"
+    printf " Locked  : %s\n" "$(fb_var unlocked)"
+    printf "------------------------------------------\n"
     pause
 }
 
 switch_slot_screen() {
     clear
-    echo "=========================================="
-    echo "             SWITCH A/B SLOT              "
-    echo "=========================================="
-    echo ""
+    printf "==========================================\n"
+    printf "             SWITCH A/B SLOT              \n"
+    printf "==========================================\n\n"
     printf "Enter target slot (a or b): "
     read -r slot
     if [[ "$slot" =~ ^[abAB]$ ]]; then
@@ -214,14 +209,13 @@ switch_slot_screen() {
 
 reboot_screen() {
     clear
-    echo "=========================================="
-    echo "              REBOOT OPTIONS              "
-    echo "=========================================="
-    echo " 1) Reboot to System"
-    echo " 2) Reboot to Recovery"
-    echo " 3) Reboot to Bootloader"
-    echo " 0) Back"
-    echo ""
+    printf "==========================================\n"
+    printf "              REBOOT OPTIONS              \n"
+    printf "==========================================\n"
+    printf " 1) Reboot to System\n"
+    printf " 2) Reboot to Recovery\n"
+    printf " 3) Reboot to Bootloader\n"
+    printf " 0) Back\n\n"
     printf "Select option: "
     read -r r_opt
     case "${r_opt:-}" in
@@ -235,9 +229,9 @@ reboot_screen() {
 
 wipe_data_screen() {
     clear
-    echo "=========================================="
-    echo "           FACTORY RESET / WIPE           "
-    echo "=========================================="
+    printf "==========================================\n"
+    printf "           FACTORY RESET / WIPE           \n"
+    printf "==========================================\n"
     warn "WARNING: This will erase all user data!"
     printf "Type 'WIPE' to confirm: "
     read -r confirm
@@ -254,7 +248,6 @@ wipe_data_screen() {
     pause
 }
 
-# --- Main Menu Loop ---
 main_menu() {
     check_tools
     while true; do
@@ -270,21 +263,21 @@ main_menu() {
             adb_status="${GREEN}Connected${RESET}"
         fi
 
-        echo "=========================================="
-        echo "        ANDROID ULTIMATE FLASHER          "
-        echo "        Version $VERSION • By Rudra         "
-        echo "=========================================="
-        echo " Fastboot : $fb_status"
-        echo " ADB      : $adb_status"
-        echo "=========================================="
-        echo " 1) Flash Image (.img)"
-        echo " 2) Custom ROM (ADB Sideload .zip)"
-        echo " 3) Device Information"
-        echo " 4) Switch A/B Slot"
-        echo " 5) Reboot Options"
-        echo " 6) Erase Data (Factory Reset)"
-        echo " 0) Exit"
-        echo "=========================================="
+        printf "==========================================\n"
+        printf "        ANDROID ULTIMATE FLASHER          \n"
+        printf "        Version %s • By Rudra         \n" "$VERSION"
+        printf "==========================================\n"
+        printf " Fastboot : %b\n" "$fb_status"
+        printf " ADB      : %b\n" "$adb_status"
+        printf "==========================================\n"
+        printf " 1) Flash Image (.img)\n"
+        printf " 2) Custom ROM (ADB Sideload .zip)\n"
+        printf " 3) Device Information\n"
+        printf " 4) Switch A/B Slot\n"
+        printf " 5) Reboot Options\n"
+        printf " 6) Erase Data (Factory Reset)\n"
+        printf " 0) Exit\n"
+        printf "==========================================\n"
         printf "Select option: "
         read -r opt
 
@@ -307,25 +300,18 @@ main_menu() {
     done
 }
 
-# --- Self-Installation / Shortcut Setup ---
 install_tool() {
-    local target_dir="$HOME/.android-ultimate-flashing-tool"
-    mkdir -p "$target_dir"
-    
-    # Copy current script to target directory if executed via bash <(...) or clone
+    mkdir -p "$BASE_DIR"
     if [ -f "$0" ]; then
-        cp "$0" "$target_dir/setup.sh"
+        cp "$0" "$BASE_DIR/setup.sh"
     fi
+    chmod +x "$BASE_DIR/setup.sh"
     
-    chmod +x "$target_dir/setup.sh"
-    
-    # Create persistent global symlink in termux bin
     mkdir -p "$PREFIX/bin"
-    ln -sf "$target_dir/setup.sh" "$PREFIX/bin/rudra"
+    ln -sf "$BASE_DIR/setup.sh" "$PREFIX/bin/rudra"
     chmod +x "$PREFIX/bin/rudra"
 }
 
-# Run installation setup on first execution
 install_tool
 
 if [[ "${BASH_SOURCE[0]:-$0}" == "$0" ]]; then
