@@ -216,13 +216,12 @@ setup_storage() {
     for d in "$HOME"/storage/external-*; do if [ -d "$d" ] && ls "$d" >/dev/null 2>&1; then SCAN_ROOTS+=("$d"); fi; done
 }
 
-# Looks through ALL folders of the phone (depth 10) for everything flashable, excluding junk folders
+# Looks through ALL folders of the phone (depth 10) for everything flashable
 do_scan() {
     : > "$SCAN_FILE"
     local r
     for r in "${SCAN_ROOTS[@]}"; do
-        find -L "$r" -maxdepth 10 \
-            \( -path '*/Android' -o -path '*/Android/data' -o -path '*/Android/obb' -o -path '*/Android/media' -o -name '.*' -o -name 'thumbnails' -o -name 'lost+found' \) -prune -o \
+        find -L "$r" -maxdepth 10 \( -path '*/Android/data' -o -path '*/Android/obb' -o -name '.*' \) -prune -o \
             -type f \( -iname '*.img' -o -iname '*.zip' -o -iname '*.tgz' -o -iname '*.tar' -o -iname '*.tar.gz' \
                        -o -iname '*.img.xz' -o -iname '*.img.gz' -o -iname 'flash_all*.sh' \) -print 2>/dev/null
     done | sort -u > "$SCAN_FILE"
@@ -258,6 +257,7 @@ scan_list() { if [ -s "$SCAN_FILE" ]; then grep -iE "$1" "$SCAN_FILE" || true; f
 human_size() { du -h "$1" 2>/dev/null | cut -f1; }
 
 # Fastboot ROM sources (only REAL ROMs are listed, no random folders)
+#   script = extracted ROM with flash_all.sh   images = folder of partition images   arc = big archive
 MIN_ARCHIVE_MB="${MIN_ARCHIVE_MB:-150}"
 ROM_KIND=(); ROM_PATH=()
 collect_roms() {
@@ -280,6 +280,7 @@ collect_roms() {
     # 2) plain image folders: boot.img or super.img + at least 4 images, not inside a ROM above
     while IFS= read -r d; do
         [ -n "$d" ] || continue
+        [ "$d" = "$STORAGE_ROOT" ] || [ "$d" = "$STORAGE_ROOT/Download" ] && continue
         [ -f "$d/boot.img" ] || [ -f "$d/super.img" ] || continue
         n=$(find "$d" -maxdepth 1 -type f -iname '*.img' 2>/dev/null | grep -c .)
         [ "$n" -ge 4 ] || continue
@@ -290,7 +291,7 @@ collect_roms() {
         seen+="$d"$'\n'; tk+=(images); tp+=("$d")
     done < <(scan_list '\.img$' | while IFS= read -r f; do dirname "$f"; done | sort -u)
 
-    # drop old tool-managed copies when the same ROM also exists elsewhere
+    # drop old tool-managed copies when the same ROM also exists elsewhere (e.g. in Download)
     local i j dup
     for ((i = 0; i < ${#tp[@]}; i++)); do
         dup=0
@@ -316,6 +317,7 @@ collect_roms() {
 }
 
 # ------------------------------ Generic numbered list -------------------------
+# Fill LIST with labels, call pick_index "<title>"  -> IDX (0-based) or return 1
 LIST=(); IDX=0; PICK_DEFAULT=0
 pick_index() {
     local title="$1" total=${#LIST[@]} page=0 per=12 pages s e i choice
@@ -335,6 +337,7 @@ pick_index() {
     done
 }
 
+# pick_file <title> <regex> [exclude-regex] -> PICKED
 PICKED=""
 pick_file() {
     local title="$1" ere="$2" excl="${3:-}" files=() f
@@ -354,6 +357,7 @@ pick_file() {
     PICKED="${files[$IDX]}"
 }
 
+# Everything that belongs to a ROM package (never offered as a loose image / zip / GSI)
 ROM_TREES=()
 refresh_rom_trees() {
     collect_roms
@@ -369,7 +373,7 @@ file_size() { stat -c %s "$1" 2>/dev/null || echo 0; }
 refresh_scan() { animate "Looking for files" do_scan; refresh_rom_trees; }
 
 # ------------------------------ Safe flashing ---------------------------------
-flash_begin() {
+flash_begin() { # battery warning + reminder
     if type -P termux-battery-status >/dev/null 2>&1; then
         local b pct; b=$(timeout 5 termux-battery-status 2>/dev/null || true)
         pct=$(printf '%s' "$b" | grep -o '"percentage": *[0-9]*' | grep -o '[0-9]*$' | head -n1)
@@ -383,6 +387,7 @@ flash_begin() {
     return 0
 }
 
+# run_step <label> <tries> <fastboot args...>  (retries; waits for reconnect; 99 = user went back)
 run_step() {
     local label="$1" max="$2" try=1 rc; shift 2
     while true; do
@@ -402,6 +407,8 @@ run_step() {
 }
 
 # ------------------------------ 1. Flash Image --------------------------------
+# Standalone images only (recovery, boot, vbmeta ...). Images that belong to a ROM package
+# and huge system images (GSI) are hidden. Two steps: folder, then image -> PICKED
 pick_image() {
     local cand=() dirs=() files=() f d n p
     while IFS= read -r f; do
@@ -420,22 +427,24 @@ pick_image() {
 
     while true; do
         d=""
-        LIST=()
-        for f in "${dirs[@]}"; do
-            n=0; for p in "${cand[@]}"; do [ "$(dirname "$p")" = "$f" ] && n=$((n + 1)); done
-            if [ "$f" = "$STORAGE_ROOT" ]; then LIST+=("(phone storage) ${GRAY}(${n} img)${RESET}")
-            else LIST+=("$(shorten "${f#"$STORAGE_ROOT"/}" $((COLS - 22))) ${GRAY}(${n} img)${RESET}"); fi
-        done
-        echo -e " ${CYAN}Choose the folder:${RESET}\n"
-        pick_index "Select folder" || return 1
-        d="${dirs[$IDX]}"
-        
+        if [ "${#dirs[@]}" -eq 1 ]; then d="${dirs[0]}"; else
+            LIST=()
+            for f in "${dirs[@]}"; do
+                n=0; for p in "${cand[@]}"; do [ "$(dirname "$p")" = "$f" ] && n=$((n + 1)); done
+                if [ "$f" = "$STORAGE_ROOT" ]; then LIST+=("(phone storage) ${GRAY}(${n} img)${RESET}")
+                else LIST+=("$(shorten "${f#"$STORAGE_ROOT"/}" $((COLS - 22))) ${GRAY}(${n} img)${RESET}"); fi
+            done
+            echo -e " ${CYAN}Choose the folder:${RESET}\n"
+            pick_index "Select folder" || return 1
+            d="${dirs[$IDX]}"
+        fi
         files=()
         for f in "${cand[@]}"; do [ "$(dirname "$f")" = "$d" ] && files+=("$f"); done
         LIST=()
         for f in "${files[@]}"; do LIST+=("${GRAY}$(printf '%6s' "$(human_size "$f")")${RESET} $(shorten "$(basename "$f")" $((COLS - 16)))"); done
         echo -e "\n ${CYAN}Images in:${RESET} ${GRAY}$(shorten "${d#"$STORAGE_ROOT"/}" $((COLS - 14)))${RESET}\n"
         if pick_index "Select image"; then PICKED="${files[$IDX]}"; return 0; fi
+        [ "${#dirs[@]}" -eq 1 ] && return 1
         echo
     done
 }
@@ -444,6 +453,7 @@ CRITICAL="bootloader|xbl|xbl_config|abl|modem|persist|efs|modemst1|modemst2|fsg|
 PARTS=(boot recovery vendor_boot init_boot dtbo vbmeta vbmeta_system vbmeta_vendor logo super)
 SKIP_PARTS="userdata|metadata|cache|misc|frp|sdcard"
 
+# Reads the REAL partition list from the phone (no typing needed)
 read_partitions() {
     local raw
     raw=$(fastboot getvar all 2>&1 | grep -oE 'partition-type:[A-Za-z0-9_]+' | cut -d: -f2 | sed -E 's/_(a|b)$//' | sort -u)
@@ -551,6 +561,7 @@ flash_sideload_screen() {
 # ------------------------------ 3. Fastboot ROM -------------------------------
 PLAN=(); PLAN_ERR=""; R_KIND=""; R_SRC=""; R_IMGDIR=""; R_TEMP=0
 
+# Extracts an archive next to itself (e.g. in Download) and KEEPS it. Sets R_KIND / R_SRC.
 extract_archive() {
     local arc="$1" base out tmp need free found n=1
     base="$(basename "$arc")"; base="${base%.tar.gz}"; base="${base%.tgz}"; base="${base%.tar}"; base="${base%.zip}"
@@ -586,6 +597,7 @@ extract_archive() {
     R_TEMP=0
 }
 
+# Reads flash_all*.sh and turns it into fastboot steps (no eval = safe)
 build_plan() {
     local script="$1" imgdir="$2" line args tok toks joined
     PLAN=(); PLAN_ERR=""
@@ -607,6 +619,7 @@ build_plan() {
     [ "${#PLAN[@]}" -gt 0 ] || { PLAN_ERR="No flash commands found in the script."; return 1; }
 }
 
+# Images-only folder: flash only the safe, well-known partitions
 build_plan_images() {
     local dir="$1" p
     PLAN=(); PLAN_ERR=""
@@ -626,6 +639,7 @@ script_label() {
     esac
 }
 
+# Builds the plan, checks files/device, shows summary. 0 = OK to continue
 rom_prepare() {
     local script="" step toks t missing=0 erase=0 lockit=0 nflash=0 j rp="" dp x
     R_IMGDIR="$R_SRC"
@@ -686,7 +700,7 @@ rom_prepare() {
     return 0
 }
 
-run_plan() {
+run_plan() { # run_plan <start_step>
     local start="$1" total=${#PLAN[@]} n=0 rc short stop=0 tries step toks
     echo ""
     for step in "${PLAN[@]}"; do
@@ -718,6 +732,7 @@ run_plan() {
     fi
 }
 
+# Unfinished flash? Offer to continue. Returns 0 if handled (caller returns), 1 if nothing to resume
 try_resume() {
     [ -f "$RESUME_FILE" ] || return 1
     local rk rs rn ri rt rp="" pd
@@ -778,7 +793,7 @@ flash_fastboot_screen() {
     local sel="${ROM_PATH[$IDX]}"
     R_KIND="${ROM_KIND[$IDX]}"; R_SRC="$sel"; R_TEMP=0
     echo ""
-    if [ "$R_KIND" = arc ]; then extract_archive "$sel" || { pause; return 1; fi
+    if [ "$R_KIND" = arc ]; then extract_archive "$sel" || { pause; return 1; }; fi
 
     echo ""
     wait_for_device fastboot || return 0
@@ -797,6 +812,7 @@ wait_userspace() {
     return 1
 }
 
+# Lists GSI images: by name, or any big .img (>600 MB) outside ROM folders
 gsi_candidates() {
     local f lf
     while IFS= read -r f; do
@@ -903,7 +919,7 @@ switch_slot_screen() {
     pause
 }
 
-reboot_to() {
+reboot_to() { # reboot_to <mode> <label>
     wait_for_device any || return 0
     local cmd=(reboot) rc
     [ "$1" != system ] && cmd+=("$1")
@@ -1022,6 +1038,7 @@ main_menu() {
     done
 }
 
+# Short command:  rudra
 install_shortcut() {
     local self target="$BASE_DIR/setup.sh" bin="${PREFIX:-/data/data/com.termux/files/usr}/bin"
     self="$(realpath "$0" 2>/dev/null || echo "")"
