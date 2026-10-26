@@ -1082,46 +1082,60 @@ setup_screen() {
 }
 
 # ------------------------------ Main menu -------------------------------------
-ANIM=1
-mline() { echo -e "${M}$1 $2●${RESET} $(printf '%-18s' "$3") ${GRAY}$4${RESET}"; if [ "$ANIM" -eq 1 ]; then sleep 0.012; fi; return 0; }
-msec()  { echo -e "${M}${CYAN}── $1 ──${RESET}"; if [ "$ANIM" -eq 1 ]; then sleep 0.012; fi; return 0; }
+ANIM=0
+mline() { echo -e "${M}$1 $2●${RESET} $(printf '%-18s' "$3") ${GRAY}$4${RESET}"; }
+msec()  { echo -e "${M}${CYAN}── $1 ──${RESET}"; }
+
+# Ensure scan exists before flash menus (lazy – only when needed)
+ensure_scan() {
+    if [ ! -s "$SCAN_FILE" ]; then
+        setup_storage
+        scan_storage
+    fi
+}
 
 main_menu() {
-    clear; calc_layout; echo; echo -n "$M"
-    typewriter " ANDROID ULTIMATE FLASHER  v${VERSION}"; echo
-    progress_bar "Starting" 10
+    clear
+    calc_layout
     lock_awake
-    setup_tools
-    type -P unzip >/dev/null 2>&1 || animate "Installing unzip" pkg install -y unzip
-    setup_storage
-    scan_storage
-    if [ "$USB_MODE" = termux ]; then
-        # Quiet check - no extra spinner on every start
-        if fb_present; then DEV_STATE=fastboot; elif adb_present; then DEV_STATE=adb; else DEV_STATE=none; fi
-    fi
+    setup_tools          # very light now
+    setup_storage        # just finds storage root, almost instant
+
+    # No scan, no animation, no progress bar on startup → instant menu
+    DEV_STATE=unchecked
 
     while true; do
-        clear; calc_layout
-        local fb=0 ad=0
-        if [ "$USB_MODE" = native ]; then
-            if fb_present; then DEV_STATE=fastboot; elif adb_present; then DEV_STATE=adb; else DEV_STATE=none; fi
-        fi
-        [ "$DEV_STATE" = fastboot ] && fb=1
-        [ "$DEV_STATE" = adb ] && ad=1
-        # dots = tool installed (green) / missing (red)
-        local d1="${RED}●${RESET}" d2="${RED}●${RESET}" d3="${RED}●${RESET}" dev="${RED}Not connected${RESET}"
+        clear
+        calc_layout
+
+        local d1="${RED}●${RESET}" d2="${RED}●${RESET}" d3="${RED}●${RESET}" dev="${GRAY}Not checked (press c)${RESET}"
         if type -P fastboot >/dev/null 2>&1 || type -P termux-fastboot >/dev/null 2>&1; then d1="${GREEN}●${RESET}"; fi
         if type -P adb >/dev/null 2>&1 || type -P termux-adb >/dev/null 2>&1; then d2="${GREEN}●${RESET}"; fi
         if command -v python3 >/dev/null 2>&1; then d3="${GREEN}●${RESET}"; fi
-        [ "$fb" -eq 1 ] && dev="${GREEN}Connected (fastboot)${RESET}"
-        [ "$ad" -eq 1 ] && dev="${GREEN}Connected (adb)${RESET}"
-        [ "$DEV_STATE" = unchecked ] && dev="${GRAY}Not checked (press c)${RESET}"
 
-        refresh_rom_trees
+        if [ "$DEV_STATE" = fastboot ]; then dev="${GREEN}Connected (fastboot)${RESET}"
+        elif [ "$DEV_STATE" = adb ]; then dev="${GREEN}Connected (adb)${RESET}"
+        elif [ "$DEV_STATE" = none ]; then dev="${RED}Not connected${RESET}"
+        fi
+
+        # Only count files if we already have a scan (keeps menu instant)
+        local img_c=0 zip_c=0 rom_c=0 gsi_c=0
+        if [ -s "$SCAN_FILE" ]; then
+            refresh_rom_trees
+            img_c=$(standalone_imgs | grep -c . || true)
+            zip_c=$(sideload_zips | grep -c . || true)
+            rom_c=${#ROM_PATH[@]}
+            gsi_c=$(gsi_candidates | grep -c . || true)
+        fi
+
         draw_box "ANDROID ULTIMATE FLASHER" "Version ${VERSION} - Created by Rudra"
         echo -e "\n${M}Tools    $d1 fastboot  $d2 adb  $d3 python"
         echo -e "${M}USB      ${USB_MODE} mode\n${M}Device   $dev"
-        echo -e "${M}Phone    $(standalone_imgs | grep -c . || true) img • $(sideload_zips | grep -c . || true) zip • ${#ROM_PATH[@]} rom • $(gsi_candidates | grep -c . || true) gsi"
+        if [ -s "$SCAN_FILE" ]; then
+            echo -e "${M}Phone    ${img_c} img • ${zip_c} zip • ${rom_c} rom • ${gsi_c} gsi"
+        else
+            echo -e "${M}Phone    ${GRAY}not scanned yet (press r)${RESET}"
+        fi
         [ -f "$RESUME_FILE" ] && echo -e "${M}${YELLOW}⚠ Unfinished flash found - open 3 to resume${RESET}"
         echo ""
         msec "FLASH"
@@ -1138,22 +1152,24 @@ main_menu() {
         msec "EXIT"
         mline 0 "$GREEN"  "Exit"             "quit application"
         echo -e "\n${M}${GREEN}●${RESET} Safe  ${YELLOW}●${RESET} Careful  ${RED}●${RESET} Erases data"
-        echo -e "${M}${GRAY}r = rescan phone   c = check device${RESET}\n"
-        ANIM=0
+        echo -e "${M}${GRAY}r = scan phone   c = check device${RESET}\n"
         local o; printf "%s Select: " "$M"; read -r o || exit 0
         case "$o" in
-            1) flash_image_screen ;;    2) flash_sideload_screen ;;
-            3) flash_fastboot_screen ;; 4) flash_gsi_screen ;;
-            5) device_info_screen ;;    6) switch_slot_screen ;;
-            7) reboot_screen ;;         8) wipe_data_screen ;;
+            1) ensure_scan; flash_image_screen ;;
+            2) ensure_scan; flash_sideload_screen ;;
+            3) ensure_scan; flash_fastboot_screen ;;
+            4) ensure_scan; flash_gsi_screen ;;
+            5) device_info_screen ;;
+            6) switch_slot_screen ;;
+            7) reboot_screen ;;
+            8) wipe_data_screen ;;
             9) setup_screen ;;
             c|C) if fb_present; then DEV_STATE=fastboot; elif adb_present; then DEV_STATE=adb; else DEV_STATE=none; fi
-                 say "Device: $DEV_STATE"; sleep 0.6 ;;
-            r|R) # force fresh scan (ignore cache)
-                 rm -f "$SCAN_FILE" "$ZIPKIND_FILE" 2>/dev/null
-                 setup_storage; scan_storage; sleep 0.5 ;;
-            0) echo; typewriter " Goodbye!"; exit 0 ;;
-            *) bad "Invalid option."; sleep 0.6 ;;
+                 say "Device: $DEV_STATE"; sleep 0.4 ;;
+            r|R) rm -f "$SCAN_FILE" "$ZIPKIND_FILE" 2>/dev/null
+                 setup_storage; scan_storage ;;
+            0) echo; echo " Goodbye!"; exit 0 ;;
+            *) bad "Invalid option."; sleep 0.4 ;;
         esac
     done
 }
