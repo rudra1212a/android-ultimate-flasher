@@ -112,31 +112,35 @@ adb()      { if [ "$USB_MODE" = termux ]; then termux-adb "$@"; else command adb
 detect_usb_mode
 
 # Installs everything automatically (first start, or menu 9)
-# More robust against common Termux SSL / symbol link errors after pkg updates
+# Fully non-interactive — no Y/N prompts for beginners
 setup_tools() { # setup_tools [force]
     local marker="$BASE_DIR/.setup_done" force="${1:-}"
     if [ -z "$force" ] && [ -f "$marker" ] && type -P fastboot >/dev/null 2>&1; then return 0; fi
+
     export DEBIAN_FRONTEND=noninteractive
+    # Force package maintainer config files so openssl.cnf etc never ask questions
+    export APT_LISTCHANGES_FRONTEND=none
+    local APT_OPTS='-o Dpkg::Options::=--force-confnew -o Dpkg::Options::=--force-confdef'
 
-    # Quick fix for the common "cannot locate symbol SSL_set_quic..." / adb link errors
-    _fix_pkg_links() {
-        if ! type -P curl >/dev/null 2>&1 || ! curl --version >/dev/null 2>&1; then
-            animate "Fixing curl/openssl" bash -c "pkg reinstall -y openssl libcurl curl 2>/dev/null || pkg install -y curl"
-        fi
-        if type -P adb >/dev/null 2>&1 && ! adb version >/dev/null 2>&1; then
-            animate "Fixing android-tools" bash -c "pkg reinstall -y android-tools 2>/dev/null || pkg install -y android-tools"
-        fi
+    _silent_pkg() {
+        # $1 = action (install/reinstall), rest = packages
+        local action="$1"; shift
+        bash -c "apt-get $APT_OPTS -y $action $* >/dev/null 2>&1 || pkg $action -y $* >/dev/null 2>&1" || true
     }
-    _fix_pkg_links
 
-    type -P fastboot >/dev/null 2>&1 || animate "Installing android-tools" bash -c "pkg update -y && pkg install -y android-tools"
+    # Fix common broken curl / openssl / adb after Termux updates (silent)
+    if ! type -P curl >/dev/null 2>&1 || ! curl --version >/dev/null 2>&1; then
+        animate "Fixing curl" _silent_pkg reinstall openssl libcurl curl
+        type -P curl >/dev/null 2>&1 || _silent_pkg install curl
+    fi
+    if type -P adb >/dev/null 2>&1 && ! adb version >/dev/null 2>&1; then
+        animate "Fixing android-tools" _silent_pkg reinstall android-tools
+    fi
+
+    type -P fastboot >/dev/null 2>&1 || animate "Installing android-tools" bash -c "pkg update -y >/dev/null 2>&1; pkg install -y android-tools"
     type -P termux-usb >/dev/null 2>&1 || animate "Installing termux-api" pkg install -y termux-api
     if ! type -P termux-fastboot >/dev/null 2>&1; then
         type -P curl >/dev/null 2>&1 || animate "Installing curl" pkg install -y curl
-        # Retry once after reinstall if curl itself is broken
-        if ! curl -fsSL --max-time 5 https://github.com >/dev/null 2>&1; then
-            animate "Repairing network packages" bash -c "pkg reinstall -y openssl libcurl curl 2>/dev/null || true"
-        fi
         animate "Installing USB helper (no-root)" bash -c "curl -fsSL https://raw.githubusercontent.com/nohajc/termux-adb/master/install.sh | bash" || \
             warn "USB helper install failed (check internet / run menu 9 later)."
     fi
