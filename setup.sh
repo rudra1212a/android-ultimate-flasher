@@ -13,6 +13,7 @@ LOG_FILE="$BASE_DIR/tool.log"
 LAST_OUT="$BASE_DIR/last_output.txt"
 SCAN_FILE="$BASE_DIR/scan.txt"
 PARTS_FILE="$BASE_DIR/parts.txt"
+ZIPKIND_FILE="$BASE_DIR/zipkinds.txt"
 RESUME_FILE="$BASE_DIR/resume.state"
 GSI_DIR="$BASE_DIR/gsi"
 mkdir -p "$BASE_DIR" "$ROMS_DIR"
@@ -224,8 +225,30 @@ do_scan() {
             -type f \( -iname '*.img' -o -iname '*.zip' -o -iname '*.tgz' -o -iname '*.tar' -o -iname '*.tar.gz' \
                        -o -iname '*.img.xz' -o -iname '*.img.gz' -o -iname 'flash_all*.sh' \) -print 2>/dev/null
     done | sort -u > "$SCAN_FILE"
+    classify_zips
     return 0
 }
+
+# Looks INSIDE every zip: sideload ROM/OTA package, fastboot package, or something else (hidden)
+classify_zips() {
+    : > "$ZIPKIND_FILE"
+    local z names kind
+    while IFS= read -r z; do
+        [ -n "$z" ] || continue
+        kind=other
+        if type -P unzip >/dev/null 2>&1; then
+            names=$(unzip -Z1 "$z" 2>/dev/null | head -n 3000)
+            if printf '%s\n' "$names" | grep -qiE '(^|/)flash_all[^/]*\.sh$|(^|/)images/[^/]+\.img$'; then kind=fastboot
+            elif [ "$(stat -c %s "$z" 2>/dev/null || echo 0)" -ge 31457280 ] \
+                && printf '%s\n' "$names" | grep -qiE '(^|/)payload\.bin$|\.new\.dat(\.(br|xz|lzma))?$|^(system|super|vendor|product|boot)\.img$|META-INF/com/android/metadata$'; then kind=sideload
+            fi
+        elif [ "$(stat -c %s "$z" 2>/dev/null || echo 0)" -ge 104857600 ]; then kind=sideload
+        fi
+        echo "${kind}|${z}" >> "$ZIPKIND_FILE"
+    done < <(grep -iE '\.zip$' "$SCAN_FILE" || true)
+    return 0
+}
+zip_list() { [ -s "$ZIPKIND_FILE" ] && { grep "^$1|" "$ZIPKIND_FILE" | cut -d'|' -f2-; }; return 0; }
 scan_storage() {
     animate "Scanning phone storage" do_scan
     ok "Found $(grep -c . "$SCAN_FILE" 2>/dev/null || echo 0) flashable file(s)."
@@ -239,26 +262,24 @@ MIN_ARCHIVE_MB="${MIN_ARCHIVE_MB:-150}"
 ROM_KIND=(); ROM_PATH=()
 collect_roms() {
     ROM_KIND=(); ROM_PATH=()
-    local f d n s inside seen=$'\n'
-    local sdirs=()
+    local f d n s p inside seen=$'\n' base hide
+    local sdirs=() tk=() tp=()
 
     # 1) extracted ROMs: flash_all.sh next to an images folder (or several image files)
     while IFS= read -r f; do
         [ -n "$f" ] || continue
         d="$(dirname "$f")"
-        [[ "$d" == "$ROMS_DIR"/* ]] && continue
         case "$seen" in *$'\n'"$d"$'\n'*) continue ;; esac
         if [ ! -d "$d/images" ]; then
             n=$(find "$d" -maxdepth 1 -type f \( -iname '*.img' -o -iname '*.bin' -o -iname '*.mbn' \) 2>/dev/null | grep -c .)
             [ "$n" -ge 3 ] || continue
         fi
-        seen+="$d"$'\n'; sdirs+=("$d"); ROM_KIND+=(script); ROM_PATH+=("$d")
+        seen+="$d"$'\n'; sdirs+=("$d"); tk+=(script); tp+=("$d")
     done < <(scan_list '/flash_all[^/]*\.sh$')
 
     # 2) plain image folders: boot.img or super.img + at least 4 images, not inside a ROM above
     while IFS= read -r d; do
         [ -n "$d" ] || continue
-        [[ "$d" == "$ROMS_DIR"/* ]] && continue
         [ "$d" = "$STORAGE_ROOT" ] || [ "$d" = "$STORAGE_ROOT/Download" ] && continue
         [ -f "$d/boot.img" ] || [ -f "$d/super.img" ] || continue
         n=$(find "$d" -maxdepth 1 -type f -iname '*.img' 2>/dev/null | grep -c .)
@@ -267,16 +288,32 @@ collect_roms() {
         for s in "${sdirs[@]}"; do [[ "$d" == "$s"/* ]] && { inside=1; break; }; done
         [ "$inside" -eq 0 ] || continue
         case "$seen" in *$'\n'"$d"$'\n'*) continue ;; esac
-        seen+="$d"$'\n'; ROM_KIND+=(images); ROM_PATH+=("$d")
+        seen+="$d"$'\n'; tk+=(images); tp+=("$d")
     done < <(scan_list '\.img$' | while IFS= read -r f; do dirname "$f"; done | sort -u)
 
-    # 3) archives: big .tgz / .tar.gz, ROM-named .tar, fastboot-named .zip
+    # drop old tool-managed copies when the same ROM also exists elsewhere (e.g. in Download)
+    local i j dup
+    for ((i = 0; i < ${#tp[@]}; i++)); do
+        dup=0
+        if [[ "${tp[$i]}" == "$ROMS_DIR"/* ]]; then
+            for ((j = 0; j < ${#tp[@]}; j++)); do
+                [[ "${tp[$j]}" == "$ROMS_DIR"/* ]] && continue
+                [ "$(basename "${tp[$j]}")" = "$(basename "${tp[$i]}")" ] && { dup=1; break; }
+            done
+        fi
+        [ "$dup" -eq 0 ] && { ROM_KIND+=("${tk[$i]}"); ROM_PATH+=("${tp[$i]}"); }
+    done
+
+    # 3) archives (.tgz / .tar.gz / ROM-named .tar / fastboot zips) - hidden once already extracted
     while IFS= read -r f; do
         [ -n "$f" ] || continue
-        [[ "$f" == "$ROMS_DIR"/* ]] && continue
         [ "$(stat -c %s "$f" 2>/dev/null || echo 0)" -ge $((MIN_ARCHIVE_MB * 1048576)) ] || continue
+        base="$(basename "$f")"; base="${base%.tar.gz}"; base="${base%.tgz}"; base="${base%.tar}"; base="${base%.zip}"
+        hide=0
+        for p in "${ROM_PATH[@]}"; do [[ "$p" == *"/$base"* ]] && { hide=1; break; }; done
+        [ "$hide" -eq 0 ] || continue
         ROM_KIND+=(arc); ROM_PATH+=("$f")
-    done < <(scan_list '\.(tgz|tar\.gz)$|(rom|image|fastboot)[^/]*\.tar$|(fastboot|_images_|images_v)[^/]*\.zip$')
+    done < <({ scan_list '\.(tgz|tar\.gz)$|(rom|image|fastboot)[^/]*\.tar$'; zip_list fastboot; } | sort -u)
 }
 
 # ------------------------------ Generic numbered list -------------------------
@@ -500,13 +537,12 @@ flash_sideload_screen() {
     while IFS= read -r z; do
         [ -n "$z" ] || continue
         in_rom_tree "$z" && continue
-        [[ "${z,,}" =~ (fastboot|_images_|images_v)[^/]*\.zip$ ]] && continue
-        [ "$(file_size "$z")" -ge 1048576 ] || continue
         zips+=("$z")
-    done < <(scan_list '\.zip$')
+    done < <(zip_list sideload)
     if [ "${#zips[@]}" -eq 0 ]; then
-        warn "No flashable .zip found on your phone."
-        echo -e " ${GRAY}Copy the ROM/zip to the phone, then press 'r' in the main menu.${RESET}"
+        warn "No flashable ROM zip found on your phone."
+        echo -e " ${GRAY}(Zips are checked inside: only real ROM / OTA packages are listed.)${RESET}"
+        echo -e " ${GRAY}Copy the ROM zip to the phone, then press 'r' in the main menu.${RESET}"
         pause; return 0
     fi
     LIST=()
@@ -525,35 +561,40 @@ flash_sideload_screen() {
 # ------------------------------ 3. Fastboot ROM -------------------------------
 PLAN=(); PLAN_ERR=""; R_KIND=""; R_SRC=""; R_IMGDIR=""; R_TEMP=0
 
-# Extracts an archive into the Termux folder (fast & safe). Sets R_KIND / R_SRC.
+# Extracts an archive next to itself (e.g. in Download) and KEEPS it. Sets R_KIND / R_SRC.
 extract_archive() {
-    local arc="$1" base out need free found
+    local arc="$1" base out tmp need free found n=1
     base="$(basename "$arc")"; base="${base%.tar.gz}"; base="${base%.tgz}"; base="${base%.tar}"; base="${base%.zip}"
-    out="$ROMS_DIR/$base"
-    if [ ! -f "$out/.extract_ok" ]; then
+    out="$(dirname "$arc")/${base}_extracted"
+    found=$(find -L "$out" -maxdepth 6 -type f -iname 'flash_all*.sh' 2>/dev/null | head -n1)
+    [ -n "$found" ] || found=$(find -L "$out" -maxdepth 6 -type f \( -iname 'boot.img' -o -iname 'super.img' \) 2>/dev/null | head -n1)
+    if [ -n "$found" ]; then
+        ok "Already extracted. Using the existing folder."
+    else
         need=$(( $(stat -c %s "$arc" 2>/dev/null || echo 0) * 3 / 1024 ))
-        free=$(df -kP "$HOME" 2>/dev/null | awk 'NR==2{print $4}')
+        free=$(df -kP "$(dirname "$arc")" 2>/dev/null | awk 'NR==2{print $4}')
         if [[ "${free:-}" =~ ^[0-9]+$ ]] && [ "$free" -lt "$need" ]; then bad "Not enough storage (need ~$((need / 1024)) MB)."; return 1; fi
-        rm -rf "$out"; mkdir -p "$out"
+        tmp="${out}.partial"; rm -rf "$tmp"; mkdir -p "$tmp"
         case "${arc,,}" in
             *.zip)
                 type -P unzip >/dev/null 2>&1 || animate "Installing unzip" pkg install -y unzip
-                animate "Extracting $(basename "$arc")" unzip -q -o "$arc" -d "$out" ;;
-            *.tar) animate "Extracting $(basename "$arc")" tar -xf "$arc" -C "$out" --no-same-owner ;;
-            *)     animate "Extracting $(basename "$arc")" tar -xzf "$arc" -C "$out" --no-same-owner ;;
-        esac || { bad "Extraction failed:"; tail -n 3 "$LAST_OUT"; rm -rf "$out"; return 1; }
-        touch "$out/.extract_ok"; ok "Extracted."
-    else
-        ok "Already extracted. Using saved copy."
+                animate "Extracting $(basename "$arc")" unzip -q -o "$arc" -d "$tmp" ;;
+            *.tar) animate "Extracting $(basename "$arc")" tar -xf "$arc" -C "$tmp" --no-same-owner ;;
+            *)     animate "Extracting $(basename "$arc")" tar -xzf "$arc" -C "$tmp" --no-same-owner ;;
+        esac || { bad "Extraction failed:"; tail -n 3 "$LAST_OUT"; rm -rf "$tmp"; return 1; }
+        if ! find "$tmp" -maxdepth 6 -type f \( -iname 'flash_all*.sh' -o -iname 'boot.img' -o -iname 'super.img' \) 2>/dev/null | grep -q .; then
+            bad "This archive does not contain a flashable ROM."; rm -rf "$tmp"; return 1
+        fi
+        while [ -e "$out" ]; do n=$((n + 1)); out="$(dirname "$arc")/${base}_extracted_$n"; done
+        mv "$tmp" "$out" || { bad "Could not save the extracted folder."; rm -rf "$tmp"; return 1; }
+        ok "Extracted to: $(shorten "${out#"$STORAGE_ROOT"/}" $((COLS - 16)))"
+        found=$(find -L "$out" -maxdepth 6 -type f -iname 'flash_all*.sh' 2>/dev/null | head -n1)
+        [ -n "$found" ] || found=$(find -L "$out" -maxdepth 6 -type f \( -iname 'boot.img' -o -iname 'super.img' \) 2>/dev/null | head -n1)
+        animate "Updating list" do_scan
     fi
-    found=$(find "$out" -maxdepth 6 -type f -iname 'flash_all*.sh' 2>/dev/null | head -n1)
-    if [ -n "$found" ]; then R_KIND=script; R_SRC="$(dirname "$found")"
-    else
-        found=$(find "$out" -maxdepth 6 -type f \( -iname 'boot.img' -o -iname 'super.img' \) 2>/dev/null | head -n1)
-        [ -n "$found" ] || { bad "No flashable ROM found inside the archive."; return 1; }
-        R_KIND=images; R_SRC="$(dirname "$found")"
-    fi
-    R_TEMP=1
+    if compgen -G "$(dirname "$found")/flash_all*.sh" >/dev/null 2>&1; then R_KIND=script; else R_KIND=images; fi
+    R_SRC="$(dirname "$found")"
+    R_TEMP=0
 }
 
 # Reads flash_all*.sh and turns it into fastboot steps (no eval = safe)
@@ -685,9 +726,6 @@ run_plan() { # run_plan <start_step>
     if [ "$stop" -eq 0 ]; then
         rm -f "$RESUME_FILE"; ok "ROM flashed successfully!"
         if [ "$R_KIND" = images ]; then ask_yn "Reboot to system now?" y && { fastboot reboot >/dev/null 2>&1; ok "Rebooting..."; }; fi
-        if [ "$R_TEMP" = 1 ]; then
-            ask_yn "Delete the extracted copy to free space?" y && { rm -rf "${ROMS_DIR:?}"/*; animate "Updating list" do_scan; ok "Space freed."; }
-        fi
     else
         bad "Stopped at step $n of $total. Do NOT boot the phone yet."
         warn "Reconnect, open menu 3 again: it will offer to RESUME."
@@ -754,7 +792,6 @@ flash_fastboot_screen() {
     pick_index "Select ROM" || { say "Cancelled."; pause; return 0; }
     local sel="${ROM_PATH[$IDX]}"
     R_KIND="${ROM_KIND[$IDX]}"; R_SRC="$sel"; R_TEMP=0
-    [[ "$sel" == "$ROMS_DIR"/* ]] && R_TEMP=1
     echo ""
     if [ "$R_KIND" = arc ]; then extract_archive "$sel" || { pause; return 1; }; fi
 
@@ -942,6 +979,7 @@ main_menu() {
     progress_bar "Starting" 20
     lock_awake
     setup_tools
+    type -P unzip >/dev/null 2>&1 || animate "Installing unzip" pkg install -y unzip
     setup_storage
     scan_storage
 
@@ -965,7 +1003,7 @@ main_menu() {
         draw_box "ANDROID ULTIMATE FLASHER" "Version ${VERSION} - Created by Rudra"
         echo -e "\n${M}Tools    $d1 fastboot  $d2 adb  $d3 python"
         echo -e "${M}USB      ${USB_MODE} mode\n${M}Device   $dev"
-        echo -e "${M}Phone    $(scan_list '\.img$' | grep -c . || true) img • $(scan_list '\.zip$' | grep -c . || true) zip • ${#ROM_PATH[@]} rom"
+        echo -e "${M}Phone    $(scan_list '\.img$' | grep -c . || true) img • $(zip_list sideload | grep -c . || true) zip • ${#ROM_PATH[@]} rom"
         [ -f "$RESUME_FILE" ] && echo -e "${M}${YELLOW}⚠ Unfinished flash found - open 3 to resume${RESET}"
         echo ""
         msec "FLASH"
