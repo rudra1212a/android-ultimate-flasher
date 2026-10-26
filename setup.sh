@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Android Ultimate Flasher - Version 1.0
-# Termux tool. Run once:  bash android_flasher_v1.0.sh   -> afterwards just: rudra
+# Android Ultimate Flasher - Version 1.1
+# Termux tool. Run once:  bash android_flasher_v1.1.sh   -> afterwards just: rudra
+# v1.1: auto-fix for "cannot locate symbol SSL_set_quic_tls_early_data_enabled"
+#       (openssl/libcurl mismatch), empty-list crash fix in pick_index.
 # ==============================================================================
 
 set -uo pipefail
 
-VERSION="1.0"
+VERSION="1.1"
 BASE_DIR="$HOME/.android-ultimate-flashing-tool"
 ROMS_DIR="$HOME/flasher_roms"
 LOG_FILE="$BASE_DIR/tool.log"
@@ -128,6 +130,21 @@ apt_install() {
     apt-get install "${opts[@]}" "$@" && return 0
     apt-get update "${opts[@]}" && apt-get install "${opts[@]}" "$@"
 }
+
+# FIX: "CANNOT LINK EXECUTABLE ... cannot locate symbol SSL_set_quic_tls_early_data_enabled"
+# Cause: openssl and libcurl/git versions do not match (old/partial Termux upgrade).
+# Fix: refresh package lists, do a full upgrade, reinstall the matching packages.
+fix_ssl() {
+    export DEBIAN_FRONTEND=noninteractive
+    local opts=(-y -o Dpkg::Options::=--force-confold -o Dpkg::Options::=--force-confdef
+                -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o Acquire::Retries=2)
+    apt-get update "${opts[@]}" || true
+    apt-get full-upgrade "${opts[@]}" || true
+    apt-get install --reinstall "${opts[@]}" openssl libcurl curl git || apt-get install "${opts[@]}" openssl libcurl curl git
+}
+# returns 0 when curl really works (the broken-library case makes this fail)
+curl_ok() { curl --version >/dev/null 2>&1; }
+
 # USB helper (no-root): download with timeouts, never hangs forever
 install_helper() {
     local f="$BASE_DIR/termux-adb-install.sh"
@@ -139,6 +156,16 @@ install_helper() {
 # Installs everything automatically (first start only, or menu 9). Next starts skip this completely.
 setup_tools() { # setup_tools [force]
     local marker="$BASE_DIR/.setup_done" force="${1:-}" need=()
+
+    # Auto-repair broken curl/openssl (runs on every start, costs nothing when curl works)
+    if ! curl_ok; then
+        warn "curl/openssl is broken (library mismatch). Repairing..."
+        animate "Fixing Termux packages (openssl/curl)" fix_ssl \
+            || { warn "Repair failed. Run manually:  pkg upgrade -y && pkg install -y openssl libcurl curl git"; tail -n 3 "$LAST_OUT"; }
+        hash -r
+        if curl_ok; then ok "curl works now."; else bad "curl is still broken. Try: termux-change-repo, then re-run."; fi
+    fi
+
     if [ -z "$force" ] && [ -f "$marker" ] && type -P fastboot >/dev/null 2>&1; then return 0; fi
     type -P fastboot   >/dev/null 2>&1 || need+=(android-tools)
     type -P termux-usb >/dev/null 2>&1 || need+=(termux-api)
@@ -404,6 +431,7 @@ collect_roms() {
 LIST=(); IDX=0; PICK_DEFAULT=0
 pick_index() {
     local title="$1" total=${#LIST[@]} page=0 per=12 pages s e i choice
+    [ "$total" -gt 0 ] || return 1          # FIX: empty list would divide by zero on 'n' / 'p'
     pages=$(( (total + per - 1) / per ))
     while true; do
         s=$((page * per)); e=$((s + per)); [ "$e" -gt "$total" ] && e=$total
