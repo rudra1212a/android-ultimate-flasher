@@ -15,9 +15,11 @@ SCAN_FILE="$BASE_DIR/scan.txt"
 PARTS_FILE="$BASE_DIR/parts.txt"
 ZIPKIND_FILE="$BASE_DIR/zipkinds.txt"
 RESUME_FILE="$BASE_DIR/resume.state"
+CACHE_FILE="$BASE_DIR/cache.tsv"
+RT_STAMP="$BASE_DIR/.rt_stamp"
 GSI_DIR="$BASE_DIR/gsi"
 mkdir -p "$BASE_DIR" "$ROMS_DIR"
-touch "$LOG_FILE" "$LAST_OUT"
+touch "$LOG_FILE" "$LAST_OUT" "$CACHE_FILE"
 
 # ------------------------------ Colors & messages -----------------------------
 RED='\033[1;31m'; GREEN='\033[1;32m'; YELLOW='\033[1;33m'; BLUE='\033[1;34m'
@@ -100,6 +102,15 @@ ask_yn() { # ask_yn "question" [y|n = default]
     [[ "${a:-$def}" =~ ^[yY]$ ]]
 }
 
+# ------------------------------ Small persistent cache ------------------------
+# Remembers what is inside big zip/tar files, so they are opened only ONCE (fast start)
+cache_key() { printf '%s|%s' "$1" "$(stat -c '%s|%Y' "$1" 2>/dev/null || echo 0)"; }
+cache_get() {
+    [ -s "$CACHE_FILE" ] || return 1
+    K="$1" awk -F'\t' 'BEGIN{k=ENVIRON["K"]} $1==k{v=$2} END{if(v=="")exit 1; print v}' "$CACHE_FILE"
+}
+cache_put() { printf '%s\t%s\n' "$1" "$2" >> "$CACHE_FILE"; }
+
 # ------------------------------ USB backend (works without root) --------------
 USB_MODE="native"
 detect_usb_mode() {
@@ -109,23 +120,45 @@ fastboot() { if [ "$USB_MODE" = termux ]; then termux-fastboot "$@"; else comman
 adb()      { if [ "$USB_MODE" = termux ]; then termux-adb "$@"; else command adb "$@"; fi; }
 detect_usb_mode
 
-# Installs everything automatically (first start, or menu 9)
-setup_tools() { # setup_tools [force]
-    local marker="$BASE_DIR/.setup_done" force="${1:-}"
-    if [ -z "$force" ] && [ -f "$marker" ] && type -P fastboot >/dev/null 2>&1; then return 0; fi
+# Package install: one single call, no prompts, short network timeouts, auto "update" only if needed
+apt_install() {
     export DEBIAN_FRONTEND=noninteractive
-    type -P fastboot >/dev/null 2>&1 || animate "Installing android-tools" bash -c "pkg update -y && pkg install -y android-tools"
-    type -P termux-usb >/dev/null 2>&1 || animate "Installing termux-api" pkg install -y termux-api
+    local opts=(-y -o Dpkg::Options::=--force-confold -o Dpkg::Options::=--force-confdef
+                -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o Acquire::Retries=1)
+    apt-get install "${opts[@]}" "$@" && return 0
+    apt-get update "${opts[@]}" && apt-get install "${opts[@]}" "$@"
+}
+# USB helper (no-root): download with timeouts, never hangs forever
+install_helper() {
+    local f="$BASE_DIR/termux-adb-install.sh"
+    curl -fsSL --connect-timeout 8 --max-time 60 -o "$f" \
+        https://raw.githubusercontent.com/nohajc/termux-adb/master/install.sh || return 1
+    timeout 240 bash "$f" < /dev/null
+}
+
+# Installs everything automatically (first start only, or menu 9). Next starts skip this completely.
+setup_tools() { # setup_tools [force]
+    local marker="$BASE_DIR/.setup_done" force="${1:-}" need=()
+    if [ -z "$force" ] && [ -f "$marker" ] && type -P fastboot >/dev/null 2>&1; then return 0; fi
+    type -P fastboot   >/dev/null 2>&1 || need+=(android-tools)
+    type -P termux-usb >/dev/null 2>&1 || need+=(termux-api)
+    type -P curl       >/dev/null 2>&1 || need+=(curl)
+    type -P unzip      >/dev/null 2>&1 || need+=(unzip)
+    if [ "${#need[@]}" -gt 0 ]; then
+        animate "Installing ${need[*]}" apt_install "${need[@]}" \
+            || { warn "Package install failed (check internet):"; tail -n 3 "$LAST_OUT"; }
+    fi
     if ! type -P termux-fastboot >/dev/null 2>&1; then
-        type -P curl >/dev/null 2>&1 || animate "Installing curl" pkg install -y curl
-        animate "Installing USB helper (no-root)" bash -c "curl -fsSL https://raw.githubusercontent.com/nohajc/termux-adb/master/install.sh | bash"
+        animate "Installing USB helper (no-root)" install_helper \
+            || { warn "USB helper download failed:"; tail -n 3 "$LAST_OUT"; }
     fi
     hash -r; detect_usb_mode; touch "$marker"
     if [ "$USB_MODE" = termux ]; then ok "USB helper ready (no-root mode)."
     else warn "USB helper not installed (check internet). Menu 9 retries."; fi
 }
 
-fb_present()       { fastboot devices 2>/dev/null | grep -q "fastboot"; }
+# (no pipe into "grep -q": with pipefail that can fail by mistake)
+fb_present()       { local o; o=$(fastboot devices 2>/dev/null) || true; [[ "$o" == *fastboot* ]]; }
 adb_present()      { adb devices 2>/dev/null | awk 'NR>1 && ($2=="device"||$2=="sideload"||$2=="recovery"){f=1} END{exit !f}'; }
 sideload_present() { adb devices 2>/dev/null | awk 'NR>1 && $2=="sideload"{f=1} END{exit !f}'; }
 declare -A FBV=()
@@ -258,42 +291,53 @@ setup_storage() {
     for d in "$HOME"/storage/external-*; do if [ -d "$d" ] && ls "$d" >/dev/null 2>&1; then SCAN_ROOTS+=("$d"); fi; done
 }
 
-# Looks through ALL folders of the phone (depth 10) for everything flashable
+# Looks through ALL folders of the phone (depth 10) for everything flashable.
+# Writes to a temp file first, then swaps it in (a half-written list is never read).
 do_scan() {
-    : > "$SCAN_FILE"
-    local r
+    local tmp="$SCAN_FILE.$BASHPID" r
+    : > "$tmp"
     for r in "${SCAN_ROOTS[@]}"; do
         find -L "$r" -maxdepth 10 \( -path '*/Android/data' -o -path '*/Android/obb' -o -name '.*' \) -prune -o \
             -type f \( -iname '*.img' -o -iname '*.zip' -o -iname '*.tgz' -o -iname '*.tar' -o -iname '*.tar.gz' \
                        -o -iname '*.img.xz' -o -iname '*.img.gz' -o -iname 'flash_all*.sh' \) -print 2>/dev/null
-    done | sort -u > "$SCAN_FILE"
+    done | sort -u > "$tmp"
+    mv -f "$tmp" "$SCAN_FILE"
     classify_zips
     return 0
 }
 
 # Looks INSIDE every zip: sideload ROM/OTA package, fastboot package, or something else (hidden)
+# Result is remembered in the cache, so every zip is opened only once.
 classify_zips() {
-    : > "$ZIPKIND_FILE"
-    local z names kind
+    local tmp="$ZIPKIND_FILE.$BASHPID" z names kind key
+    : > "$tmp"
     while IFS= read -r z; do
         [ -n "$z" ] || continue
-        kind=other
-        if type -P unzip >/dev/null 2>&1; then
-            names=$(unzip -Z1 "$z" 2>/dev/null | head -n 3000)
-            if printf '%s\n' "$names" | grep -qiE '(^|/)flash_all[^/]*\.sh$|(^|/)images/[^/]+\.img$'; then kind=fastboot
-            elif [ "$(stat -c %s "$z" 2>/dev/null || echo 0)" -ge 31457280 ] \
-                && printf '%s\n' "$names" | grep -qiE '(^|/)payload\.bin$|\.new\.dat(\.(br|xz|lzma))?$|^(system|super|vendor|product|boot)\.img$|META-INF/com/android/metadata$'; then kind=sideload
+        key="zip:$(cache_key "$z")"
+        kind="$(cache_get "$key")" || kind=""
+        if [ -z "$kind" ]; then
+            kind=other
+            if type -P unzip >/dev/null 2>&1; then
+                names=$(unzip -Z1 "$z" 2>/dev/null | head -n 3000 || true)
+                if grep -qiE '(^|/)flash_all[^/]*\.sh$|(^|/)images/[^/]+\.img$' <<< "$names"; then kind=fastboot
+                elif [ "$(stat -c %s "$z" 2>/dev/null || echo 0)" -ge 31457280 ] \
+                    && grep -qiE '(^|/)payload\.bin$|\.new\.dat(\.(br|xz|lzma))?$|^(system|super|vendor|product|boot)\.img$|META-INF/com/android/metadata$' <<< "$names"; then kind=sideload
+                fi
+            elif [ "$(stat -c %s "$z" 2>/dev/null || echo 0)" -ge 104857600 ]; then kind=sideload
             fi
-        elif [ "$(stat -c %s "$z" 2>/dev/null || echo 0)" -ge 104857600 ]; then kind=sideload
+            cache_put "$key" "$kind"
         fi
-        echo "${kind}|${z}" >> "$ZIPKIND_FILE"
+        echo "${kind}|${z}" >> "$tmp"
     done < <(grep -iE '\.zip$' "$SCAN_FILE" || true)
+    mv -f "$tmp" "$ZIPKIND_FILE"
     return 0
 }
 zip_list() { [ -s "$ZIPKIND_FILE" ] && { grep "^$1|" "$ZIPKIND_FILE" | cut -d'|' -f2-; }; return 0; }
 scan_storage() {
+    local n
     animate "Scanning phone storage" do_scan
-    ok "Found $(grep -c . "$SCAN_FILE" 2>/dev/null || echo 0) flashable file(s)."
+    n=$(grep -c . "$SCAN_FILE" 2>/dev/null) || true
+    ok "Found ${n:-0} flashable file(s)."
 }
 scan_list() { if [ -s "$SCAN_FILE" ]; then grep -iE "$1" "$SCAN_FILE" || true; fi; return 0; }
 human_size() { du -h "$1" 2>/dev/null | cut -f1; }
@@ -302,14 +346,15 @@ human_size() { du -h "$1" 2>/dev/null | cut -f1; }
 #   script = extracted ROM folder      arc = big archive (.tgz / .tar.gz / .tar / .zip) with a flash_all script
 MIN_ARCHIVE_MB="${MIN_ARCHIVE_MB:-150}"
 ROM_KIND=(); ROM_PATH=()
-declare -A ARC_SCRIPT=()
-archive_has_script() { # looks at the first entries of a tar archive
+archive_has_script() { # looks at the first entries of a tar archive (remembered in the cache)
     local f="$1" key lst r
-    key="$f|$(stat -c %s "$f" 2>/dev/null || echo 0)"
-    if [ -n "${ARC_SCRIPT[$key]:-}" ]; then [ "${ARC_SCRIPT[$key]}" = yes ]; return; fi
-    lst=$(tar -tf "$f" 2>/dev/null | head -n 2000 || true)
-    if printf '%s\n' "$lst" | grep -qiE '(^|/)flash_all[^/]*\.sh$'; then r=yes; else r=no; fi
-    ARC_SCRIPT[$key]="$r"
+    key="tar:$(cache_key "$f")"
+    r="$(cache_get "$key")" || r=""
+    if [ -z "$r" ]; then
+        lst=$(tar -tf "$f" 2>/dev/null | head -n 2000 || true)
+        if grep -qiE '(^|/)flash_all[^/]*\.sh$' <<< "$lst"; then r=yes; else r=no; fi
+        cache_put "$key" "$r"
+    fi
     [ "$r" = yes ]
 }
 collect_roms() {
@@ -323,8 +368,8 @@ collect_roms() {
         d="$(dirname "$f")"
         case "$seen" in *$'\n'"$d"$'\n'*) continue ;; esac
         if [ ! -d "$d/images" ]; then
-            n=$(find "$d" -maxdepth 1 -type f \( -iname '*.img' -o -iname '*.bin' -o -iname '*.mbn' \) 2>/dev/null | grep -c .)
-            [ "$n" -ge 3 ] || continue
+            n=$(find "$d" -maxdepth 1 -type f \( -iname '*.img' -o -iname '*.bin' -o -iname '*.mbn' \) 2>/dev/null | grep -c .) || true
+            [ "${n:-0}" -ge 3 ] || continue
         fi
         seen+="$d"$'\n'; tk+=(script); tp+=("$d")
     done < <(scan_list '/flash_all[^/]*\.sh$')
@@ -527,7 +572,7 @@ read_partitions() {
     raw=$(fastboot getvar all 2>&1 | grep -oE 'partition-type:[A-Za-z0-9_]+' | cut -d: -f2 | sed -E 's/_(a|b)$//' | sort -u)
     : > "$PARTS_FILE"
     local p
-    for p in "${PARTS[@]}"; do printf '%s\n' "$raw" | grep -qx "$p" && echo "$p" >> "$PARTS_FILE"; done
+    for p in "${PARTS[@]}"; do grep -qx "$p" <<< "$raw" && echo "$p" >> "$PARTS_FILE"; done
     printf '%s\n' "$raw" | grep -vxE "$SKIP_PARTS" | grep -vxFf "$PARTS_FILE" | grep . >> "$PARTS_FILE" || true
     return 0
 }
@@ -654,7 +699,7 @@ extract_archive() {
             tmp="$where/${base}_extracted.partial"; rm -rf "$tmp"; mkdir -p "$tmp" 2>/dev/null || continue
             case "${arc,,}" in
                 *.zip)
-                    type -P unzip >/dev/null 2>&1 || animate "Installing unzip" pkg install -y unzip
+                    type -P unzip >/dev/null 2>&1 || animate "Installing unzip" apt_install unzip
                     animate "Extracting $(basename "$arc")" unzip -q -o "$arc" -d "$tmp" ;;
                 *.tar) animate "Extracting $(basename "$arc")" tar -xf "$arc" -C "$tmp" --no-same-owner ;;
                 *)     animate "Extracting $(basename "$arc")" tar -xzf "$arc" -C "$tmp" --no-same-owner ;;
@@ -917,7 +962,7 @@ flash_gsi_screen() {
 
     case "$l" in *.img.xz|*.img.gz)
         local dec=xz pk=xz-utils; [[ "$l" == *.gz ]] && { dec=gzip; pk=gzip; }
-        type -P "$dec" >/dev/null 2>&1 || animate "Installing $pk" pkg install -y "$pk"
+        type -P "$dec" >/dev/null 2>&1 || animate "Installing $pk" apt_install "$pk"
         mkdir -p "$GSI_DIR"; sysimg="$GSI_DIR/system.img"; rm -f "$sysimg"
         local free; free=$(df -kP "$HOME" 2>/dev/null | awk 'NR==2{print $4}')
         if [[ "${free:-}" =~ ^[0-9]+$ ]] && [ "$free" -lt 4000000 ]; then warn "Low free space ($((free / 1024)) MB). Decompress may fail."; fi
@@ -1043,25 +1088,50 @@ mline() { echo -e "${M}$1 $2●${RESET} $(printf '%-18s' "$3") ${GRAY}$4${RESET}
 msec()  { echo -e "${M}${CYAN}── $1 ──${RESET}"; if [ "$ANIM" -eq 1 ]; then sleep 0.025; fi; return 0; }
 
 main_menu() {
+    local n
     clear; calc_layout; echo; echo -n "$M"
     typewriter " ANDROID ULTIMATE FLASHER  v${VERSION}"; echo
     progress_bar "Starting" 20
     lock_awake
     setup_tools
-    type -P unzip >/dev/null 2>&1 || animate "Installing unzip" pkg install -y unzip
+    type -P unzip >/dev/null 2>&1 || animate "Installing unzip" apt_install unzip
     setup_storage
-    scan_storage
+    rm -f "$RT_STAMP"
+    if [ -s "$SCAN_FILE" ]; then
+        # fast start: show the last result at once, refresh the list quietly in the background
+        n=$(grep -c . "$SCAN_FILE" 2>/dev/null) || true
+        ok "Found ${n:-0} flashable file(s)."
+        ( do_scan ) > /dev/null 2>&1 < /dev/null &
+        disown 2>/dev/null || true
+    else
+        scan_storage
+    fi
     if [ "$USB_MODE" = termux ]; then
         say "Checking for a connected phone (tap Allow if asked)..."
-        if fb_present; then DEV_STATE=fastboot; elif adb_present; then DEV_STATE=adb; else DEV_STATE=none; fi
+        local fo ao
+        fo=$(timeout 4 termux-fastboot devices 2>/dev/null) || true
+        if [[ "$fo" == *fastboot* ]]; then DEV_STATE=fastboot
+        else
+            ao=$(timeout 4 termux-adb devices 2>/dev/null | awk 'NR>1 && ($2=="device"||$2=="sideload"||$2=="recovery"){print "yes"; exit}') || true
+            if [ "${ao:-}" = yes ]; then DEV_STATE=adb; else DEV_STATE=none; fi
+        fi
     fi
 
     while true; do
-        clear; calc_layout
-        local fb=0 ad=0
+        # ---- all slow work happens BEFORE clearing (the screen is never blank) ----
+        if [ ! -f "$RT_STAMP" ] || [ "$SCAN_FILE" -nt "$RT_STAMP" ] || [ "$ZIPKIND_FILE" -nt "$RT_STAMP" ]; then
+            refresh_rom_trees; touch "$RT_STAMP"
+        fi
         if [ "$USB_MODE" = native ]; then
             if fb_present; then DEV_STATE=fastboot; elif adb_present; then DEV_STATE=adb; else DEV_STATE=none; fi
         fi
+        local n_img n_zip n_gsi
+        n_img=$(standalone_imgs | grep -c . || true)
+        n_zip=$(sideload_zips | grep -c . || true)
+        n_gsi=$(gsi_candidates | grep -c . || true)
+
+        clear; calc_layout
+        local fb=0 ad=0
         [ "$DEV_STATE" = fastboot ] && fb=1
         [ "$DEV_STATE" = adb ] && ad=1
         # dots = tool installed (green) / missing (red)
@@ -1073,11 +1143,10 @@ main_menu() {
         [ "$ad" -eq 1 ] && dev="${GREEN}Connected (adb)${RESET}"
         [ "$DEV_STATE" = unchecked ] && dev="${GRAY}Not checked (press c)${RESET}"
 
-        refresh_rom_trees
         draw_box "ANDROID ULTIMATE FLASHER" "Version ${VERSION} - Created by Rudra"
         echo -e "\n${M}Tools    $d1 fastboot  $d2 adb  $d3 python"
         echo -e "${M}USB      ${USB_MODE} mode\n${M}Device   $dev"
-        echo -e "${M}Phone    $(standalone_imgs | grep -c . || true) img • $(sideload_zips | grep -c . || true) zip • ${#ROM_PATH[@]} rom • $(gsi_candidates | grep -c . || true) gsi"
+        echo -e "${M}Phone    ${n_img} img • ${n_zip} zip • ${#ROM_PATH[@]} rom • ${n_gsi} gsi"
         [ -f "$RESUME_FILE" ] && echo -e "${M}${YELLOW}⚠ Unfinished flash found - open 3 to resume${RESET}"
         echo ""
         msec "FLASH"
