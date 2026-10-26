@@ -111,17 +111,21 @@ fastboot() { if [ "$USB_MODE" = termux ]; then termux-fastboot "$@"; else comman
 adb()      { if [ "$USB_MODE" = termux ]; then termux-adb "$@"; else command adb "$@"; fi; }
 detect_usb_mode
 
-# Installs everything automatically (first start, or menu 9)
-# Extremely light + 100% non-interactive (never shows config Y/N prompts)
+# Lightweight on normal start. Heavy install only when force=1 (menu 9)
+# or when a flash function actually needs the tools.
 setup_tools() { # setup_tools [force]
-    local marker="$BASE_DIR/.setup_done" force="${1:-}"
-    if [ -z "$force" ] && [ -f "$marker" ] && type -P fastboot >/dev/null 2>&1; then return 0; fi
+    local force="${1:-}"
+    detect_usb_mode
 
+    # Normal start → do nothing heavy, just detect
+    if [ -z "$force" ]; then
+        return 0
+    fi
+
+    # Only reached when user opens "Setup / Fix USB" (menu 9)
     export DEBIAN_FRONTEND=noninteractive
     export APT_LISTCHANGES_FRONTEND=none
 
-    # Only install missing packages. Never reinstall openssl / bash / curl
-    # (reinstall is what triggers the confusing config file prompts)
     if ! type -P fastboot >/dev/null 2>&1; then
         animate "Installing android-tools" pkg install -y android-tools
     fi
@@ -134,23 +138,31 @@ setup_tools() { # setup_tools [force]
     if ! type -P unzip >/dev/null 2>&1; then
         animate "Installing unzip" pkg install -y unzip
     fi
-
-    # USB helper only if missing
-    if ! type -P termux-fastboot >/dev/null 2>&1; then
-        if type -P curl >/dev/null 2>&1; then
-            animate "Installing USB helper" bash -c "curl -fsSL --connect-timeout 12 --max-time 45 https://raw.githubusercontent.com/nohajc/termux-adb/master/install.sh | bash" || \
-                warn "USB helper skipped (you can still use normal fastboot)."
-        fi
+    if ! type -P termux-fastboot >/dev/null 2>&1 && type -P curl >/dev/null 2>&1; then
+        animate "Installing USB helper" bash -c "curl -fsSL --connect-timeout 12 --max-time 40 https://raw.githubusercontent.com/nohajc/termux-adb/master/install.sh | bash" || true
     fi
 
     hash -r
     detect_usb_mode
-    touch "$marker"
     if [ "$USB_MODE" = termux ]; then
         ok "USB helper ready (no-root mode)."
     else
         ok "Tools ready."
     fi
+}
+
+# Called only when user tries to flash something
+need_tools() {
+    if type -P fastboot >/dev/null 2>&1; then return 0; fi
+    echo ""
+    warn "android-tools not installed yet."
+    if ask_yn "Install now? (needed for flashing)" y; then
+        setup_tools force
+    else
+        bad "Cannot continue without android-tools."
+        return 1
+    fi
+    type -P fastboot >/dev/null 2>&1
 }
 
 fb_present()       { fastboot devices 2>/dev/null | grep -q "fastboot"; }
@@ -216,6 +228,9 @@ device_card() {
 
 # wait_for_device fastboot|sideload|any  -> 0 found, 1 user pressed back
 wait_for_device() {
+    # Install tools only when actually needed (not on every startup)
+    need_tools || return 1
+
     local mode="$1" label="$1" tip chk=5 key="" i=0 t=$SECONDS hinted=0 asked=0 note=""
     case "$mode" in
         fastboot) tip="Phone: power off, hold Power + Volume Down." ;;
@@ -1213,5 +1228,4 @@ if [[ "${BASH_SOURCE[0]:-$0}" == "$0" ]]; then
     printf '\033[?25l'
     main_menu
 fi
-
 
