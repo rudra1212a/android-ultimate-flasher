@@ -1157,3 +1157,4 @@ check_update() {
 
 install_shortcut
 if [[ "${BASH_SOURCE[0]:-$0}" == "$0" ]]; then check_update; main_menu; fi
+
