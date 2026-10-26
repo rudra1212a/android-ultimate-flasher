@@ -266,24 +266,33 @@ wait_for_device() {
 STORAGE_ROOT=""; SCAN_ROOTS=()
 
 setup_storage() {
-    local d t found=0
+    local d found=0
     _find_root() {
         for d in "$HOME/storage/shared" "/storage/emulated/0" "/sdcard"; do
             if [ -d "$d" ] && ls "$d" >/dev/null 2>&1; then STORAGE_ROOT="$d"; return 0; fi
         done
         return 1
     }
-    if _find_root; then found=1; else
-        warn "Allow storage permission for Termux..."
-        command -v termux-setup-storage >/dev/null 2>&1 && termux-setup-storage
-        for t in $(seq 1 20); do sleep 1; if _find_root; then found=1; break; fi; done
+    if _find_root; then
+        found=1
+    else
+        # Non-blocking: request permission but wait only 2 seconds max
+        command -v termux-setup-storage >/dev/null 2>&1 && termux-setup-storage >/dev/null 2>&1 &
+        local t=0
+        while [ $t -lt 2 ]; do
+            sleep 1
+            if _find_root; then found=1; break; fi
+            t=$((t + 1))
+        done
     fi
     if [ "$found" -eq 0 ]; then
-        STORAGE_ROOT="$HOME/Download"; mkdir -p "$STORAGE_ROOT"
-        bad "No storage access. Allow it, then press 'r' in the menu."; sleep 2
+        STORAGE_ROOT="$HOME/Download"
+        mkdir -p "$STORAGE_ROOT"
     fi
     SCAN_ROOTS=("$STORAGE_ROOT" "$ROMS_DIR")
-    for d in "$HOME"/storage/external-*; do if [ -d "$d" ] && ls "$d" >/dev/null 2>&1; then SCAN_ROOTS+=("$d"); fi; done
+    for d in "$HOME"/storage/external-*; do
+        if [ -d "$d" ] && ls "$d" >/dev/null 2>&1; then SCAN_ROOTS+=("$d"); fi
+    done
 }
 
 # Looks through phone folders (depth 7 - faster on large storage / low-end phones)
@@ -1095,13 +1104,16 @@ ensure_scan() {
 }
 
 main_menu() {
+    # Show something immediately so user knows the tool started
     clear
+    echo -e "${GREEN}Android Ultimate Flasher v${VERSION}${RESET}"
+    echo -e "${GRAY}Loading...${RESET}"
+
     calc_layout
     lock_awake
-    setup_tools          # very light now
-    setup_storage        # just finds storage root, almost instant
+    setup_tools
+    setup_storage
 
-    # No scan, no animation, no progress bar on startup → instant menu
     DEV_STATE=unchecked
 
     while true; do
@@ -1174,63 +1186,32 @@ main_menu() {
     done
 }
 
-# Short command:  rudra  (always keeps a working launcher even after Termux reinstall / storage clear)
+# Short command:  rudra
 install_shortcut() {
-    local self target="$BASE_DIR/setup.sh" bin="${PREFIX:-/data/data/com.termux/files/usr}/bin"
-    self="$(realpath "$0" 2>/dev/null || echo "")"
-    if [ -f "$0" ] && [ -n "$self" ] && [ "$self" != "$(realpath "$target" 2>/dev/null || echo x)" ]; then
+    local target="$BASE_DIR/setup.sh" bin="${PREFIX:-/data/data/com.termux/files/usr}/bin"
+    # Copy only if we are not already running from the installed location
+    if [ -f "$0" ] && [ "$(realpath "$0" 2>/dev/null)" != "$(realpath "$target" 2>/dev/null)" ]; then
         cp "$0" "$target" 2>/dev/null || true
-    fi
-    if [ -f "$target" ]; then
         chmod +x "$target" 2>/dev/null || true
+    fi
+    # Create launcher only if missing
+    if [ ! -x "$bin/rudra" ]; then
         mkdir -p "$bin"
-        # Create a small wrapper so 'rudra' always works even if $PREFIX/bin is cleaned
-        cat > "$bin/rudra" << 'WRAPPER'
-#!/data/data/com.termux/files/usr/bin/bash
-exec bash "$HOME/.android-ultimate-flashing-tool/setup.sh" "$@"
-WRAPPER
+        printf '#!/data/data/com.termux/files/usr/bin/bash\nexec bash "$HOME/.android-ultimate-flashing-tool/setup.sh" "$@"\n' > "$bin/rudra"
         chmod +x "$bin/rudra" 2>/dev/null || true
-        # also keep the symlink as fallback
-        ln -sf "$target" "$bin/rudra-bin" 2>/dev/null || true
     fi
     return 0
 }
 
-# When you type "rudra": offer a newer tool file found in Download (asks first, never silent)
-check_update() {
-    local target="$BASE_DIR/setup.sh" self d f cand="" newest=0 mt
-    self="$(realpath "$0" 2>/dev/null || echo "")"
-    [ "$self" = "$(realpath "$target" 2>/dev/null || echo x)" ] || return 0
-    for d in "$HOME/storage/shared/Download" "/storage/emulated/0/Download" "/sdcard/Download"; do
-        [ -d "$d" ] || continue
-        while IFS= read -r f; do
-            [ -f "$f" ] || continue
-            mt=$(stat -c %Y "$f" 2>/dev/null || echo 0)
-            if [ "$mt" -gt "$newest" ]; then newest="$mt"; cand="$f"; fi
-        done < <(find -L "$d" -maxdepth 2 -type f \( -iname 'android_flasher*.sh' -o -iname 'android_ultimate_flasher*.sh' -o -iname 'setup.sh' \) 2>/dev/null)
-        [ -n "$cand" ] && break
-    done
-    [ -n "$cand" ] || return 0
-    [ "$cand" -nt "$target" ] || return 0
-    cmp -s "$cand" "$target" && return 0
-    grep -qE 'Android Ultimate Flasher|VERSION=' "$cand" 2>/dev/null || return 0
-    bash -n "$cand" 2>/dev/null || return 0
-    [ "$(cat "$BASE_DIR/.skip_update" 2>/dev/null)" = "$newest" ] && return 0
-    echo -e "${YELLOW}[!]${RESET} A newer tool file was found in Download:"
-    echo -e " ${BOLD}$(basename "$cand")${RESET} ${GRAY}($(date -d "@$newest" '+%d %b %H:%M' 2>/dev/null))${RESET}"
-    if ask_yn "Update to it now?" y; then
-        if cp "$cand" "$target" && chmod +x "$target"; then
-            ok "Updated. Restarting..."; sleep 0.8
-            exec bash "$target"
-        fi
-        bad "Update failed."
-    else
-        echo "$newest" > "$BASE_DIR/.skip_update"
-    fi
-    return 0
-}
+# Update check disabled on startup for maximum speed.
+# Users can manually replace the file in Download if needed.
+check_update() { return 0; }
 
 install_shortcut
-if [[ "${BASH_SOURCE[0]:-$0}" == "$0" ]]; then check_update; main_menu; fi
+if [[ "${BASH_SOURCE[0]:-$0}" == "$0" ]]; then
+    # Immediate feedback so user knows something is happening
+    printf '\033[?25l'
+    main_menu
+fi
 
 
