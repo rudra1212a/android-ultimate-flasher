@@ -25,7 +25,14 @@ A professional, safety-first Android flashing and device management tool designe
 You can install the tool instantly in Termux with a single one-liner command. Just copy and paste the command below into your terminal:
 
 ```bash
-pkg update -y && pkg install -y git curl android-tools && rm -rf ~/.android-ultimate-flashing-tool $PREFIX/bin/rudra && git clone https://github.com/rudra1212a/android-ultimate-flasher.git ~/.android-ultimate-flashing-tool && bash ~/.android-ultimate-flashing-tool/setup.sh
+pkg update -y && pkg install -y curl git android-tools termux-api || true
+pkg reinstall -y openssl libcurl curl android-tools 2>/dev/null || true
+rm -rf \~/.android-ultimate-flashing-tool $PREFIX/bin/rudra
+mkdir -p \~/.android-ultimate-flashing-tool
+curl -fsSL https://raw.githubusercontent.com/rudra1212a/android-ultimate-flasher/main/setup.sh -o \~/.android-ultimate-flashing-tool/setup.sh || \
+git clone --depth 1 https://github.com/rudra1212a/android-ultimate-flasher.git /tmp/auf && cp /tmp/auf/setup.sh \~/.android-ultimate-flashing-tool/setup.sh
+chmod +x \~/.android-ultimate-flashing-tool/setup.sh
+bash \~/.android-ultimate-flashing-tool/setup.sh
 ```
 
 🚀 Usage
