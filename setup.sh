@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Android Ultimate Flasher - Version 1.0
-# Termux tool. Run once:  bash android_flasher_v1.0.sh   -> afterwards just: rudra
+# Android Ultimate Flasher - Version 1.2
+# Termux tool. Optimized for speed + robust install on low-end / fresh Termux.
+# Run once: bash setup.sh   -> afterwards just type: rudra
 # ==============================================================================
 
 set -uo pipefail
 
-VERSION="1.0"
+VERSION="1.2"
 BASE_DIR="$HOME/.android-ultimate-flashing-tool"
 ROMS_DIR="$HOME/flasher_roms"
 LOG_FILE="$BASE_DIR/tool.log"
@@ -16,6 +17,7 @@ PARTS_FILE="$BASE_DIR/parts.txt"
 ZIPKIND_FILE="$BASE_DIR/zipkinds.txt"
 RESUME_FILE="$BASE_DIR/resume.state"
 GSI_DIR="$BASE_DIR/gsi"
+SCAN_CACHE_SEC=180   # reuse previous scan if < 3 min old (big startup speed win)
 mkdir -p "$BASE_DIR" "$ROMS_DIR"
 touch "$LOG_FILE" "$LAST_OUT"
 
@@ -66,7 +68,7 @@ draw_box() {
 }
 header() { clear; calc_layout; draw_box "$1"; echo ""; }
 
-# ------------------------------ Animations ------------------------------------
+# ------------------------------ Animations (speed-tuned for low-end phones) ---
 # Runs a command in the background (never touches the keyboard) with a spinner
 animate() {
     local msg; msg=$(shorten "$1" $((COLS - 14))); shift
@@ -75,23 +77,23 @@ animate() {
     printf '\033[?25l'
     while kill -0 "$pid" 2>/dev/null; do
         printf "\r\033[K${CYAN}[%s]${RESET} %s ${GRAY}%ss${RESET}" "${SPIN[$((i % 10))]}" "$msg" "$((SECONDS - t))"
-        i=$((i + 1)); sleep 0.1
+        i=$((i + 1)); sleep 0.08
     done
     wait "$pid"; local rc=$?
     printf "\r\033[K\033[?25h"
     return $rc
 }
 progress_bar() {
-    local msg="$1" n="${2:-24}" i
+    local msg="$1" n="${2:-12}" i   # shorter bar by default
     printf '\033[?25l'
     for ((i = 0; i <= n; i++)); do
         printf "\r\033[K${CYAN}[*]${RESET} %s ${GREEN}%s${GRAY}%s${RESET} %3d%%" \
             "$msg" "$(hline "$i" "█")" "$(hline "$((n - i))" "░")" "$((i * 100 / n))"
-        sleep 0.02
+        sleep 0.008
     done
     echo; printf '\033[?25h'
 }
-typewriter() { local i; for ((i = 0; i < ${#1}; i++)); do printf "%s" "${1:$i:1}"; sleep 0.012; done; echo; }
+typewriter() { local i; for ((i = 0; i < ${#1}; i++)); do printf "%s" "${1:$i:1}"; sleep 0.004; done; echo; }
 pause() { if [ -t 0 ]; then echo; read -n 1 -s -r -p "Press any key to continue..."; echo; fi; return 0; }
 ask_yn() { # ask_yn "question" [y|n = default]
     local def="${2:-n}" hint="(y/N)" a
@@ -110,15 +112,33 @@ adb()      { if [ "$USB_MODE" = termux ]; then termux-adb "$@"; else command adb
 detect_usb_mode
 
 # Installs everything automatically (first start, or menu 9)
+# More robust against common Termux SSL / symbol link errors after pkg updates
 setup_tools() { # setup_tools [force]
     local marker="$BASE_DIR/.setup_done" force="${1:-}"
     if [ -z "$force" ] && [ -f "$marker" ] && type -P fastboot >/dev/null 2>&1; then return 0; fi
     export DEBIAN_FRONTEND=noninteractive
+
+    # Quick fix for the common "cannot locate symbol SSL_set_quic..." / adb link errors
+    _fix_pkg_links() {
+        if ! type -P curl >/dev/null 2>&1 || ! curl --version >/dev/null 2>&1; then
+            animate "Fixing curl/openssl" bash -c "pkg reinstall -y openssl libcurl curl 2>/dev/null || pkg install -y curl"
+        fi
+        if type -P adb >/dev/null 2>&1 && ! adb version >/dev/null 2>&1; then
+            animate "Fixing android-tools" bash -c "pkg reinstall -y android-tools 2>/dev/null || pkg install -y android-tools"
+        fi
+    }
+    _fix_pkg_links
+
     type -P fastboot >/dev/null 2>&1 || animate "Installing android-tools" bash -c "pkg update -y && pkg install -y android-tools"
     type -P termux-usb >/dev/null 2>&1 || animate "Installing termux-api" pkg install -y termux-api
     if ! type -P termux-fastboot >/dev/null 2>&1; then
         type -P curl >/dev/null 2>&1 || animate "Installing curl" pkg install -y curl
-        animate "Installing USB helper (no-root)" bash -c "curl -fsSL https://raw.githubusercontent.com/nohajc/termux-adb/master/install.sh | bash"
+        # Retry once after reinstall if curl itself is broken
+        if ! curl -fsSL --max-time 5 https://github.com >/dev/null 2>&1; then
+            animate "Repairing network packages" bash -c "pkg reinstall -y openssl libcurl curl 2>/dev/null || true"
+        fi
+        animate "Installing USB helper (no-root)" bash -c "curl -fsSL https://raw.githubusercontent.com/nohajc/termux-adb/master/install.sh | bash" || \
+            warn "USB helper install failed (check internet / run menu 9 later)."
     fi
     hash -r; detect_usb_mode; touch "$marker"
     if [ "$USB_MODE" = termux ]; then ok "USB helper ready (no-root mode)."
@@ -258,12 +278,13 @@ setup_storage() {
     for d in "$HOME"/storage/external-*; do if [ -d "$d" ] && ls "$d" >/dev/null 2>&1; then SCAN_ROOTS+=("$d"); fi; done
 }
 
-# Looks through ALL folders of the phone (depth 10) for everything flashable
+# Looks through phone folders (depth 7 - faster on large storage / low-end phones)
 do_scan() {
     : > "$SCAN_FILE"
     local r
     for r in "${SCAN_ROOTS[@]}"; do
-        find -L "$r" -maxdepth 10 \( -path '*/Android/data' -o -path '*/Android/obb' -o -name '.*' \) -prune -o \
+        [ -d "$r" ] || continue
+        find -L "$r" -maxdepth 7 \( -path '*/Android/data' -o -path '*/Android/obb' -o -path '*/.thumbnails' -o -name '.*' \) -prune -o \
             -type f \( -iname '*.img' -o -iname '*.zip' -o -iname '*.tgz' -o -iname '*.tar' -o -iname '*.tar.gz' \
                        -o -iname '*.img.xz' -o -iname '*.img.gz' -o -iname 'flash_all*.sh' \) -print 2>/dev/null
     done | sort -u > "$SCAN_FILE"
@@ -271,20 +292,26 @@ do_scan() {
     return 0
 }
 
-# Looks INSIDE every zip: sideload ROM/OTA package, fastboot package, or something else (hidden)
+# Looks INSIDE zips only when size is interesting (big speed win - skip tiny zips)
 classify_zips() {
     : > "$ZIPKIND_FILE"
-    local z names kind
+    local z names kind sz
     while IFS= read -r z; do
         [ -n "$z" ] || continue
+        sz=$(stat -c %s "$z" 2>/dev/null || echo 0)
+        # skip very small zips - almost never real ROMs
+        [ "$sz" -lt 1048576 ] && { echo "other|${z}" >> "$ZIPKIND_FILE"; continue; }
         kind=other
         if type -P unzip >/dev/null 2>&1; then
-            names=$(unzip -Z1 "$z" 2>/dev/null | head -n 3000)
-            if printf '%s\n' "$names" | grep -qiE '(^|/)flash_all[^/]*\.sh$|(^|/)images/[^/]+\.img$'; then kind=fastboot
-            elif [ "$(stat -c %s "$z" 2>/dev/null || echo 0)" -ge 31457280 ] \
-                && printf '%s\n' "$names" | grep -qiE '(^|/)payload\.bin$|\.new\.dat(\.(br|xz|lzma))?$|^(system|super|vendor|product|boot)\.img$|META-INF/com/android/metadata$'; then kind=sideload
+            # only list first 1500 entries - enough to detect flash_all / payload / META-INF
+            names=$(unzip -Z1 "$z" 2>/dev/null | head -n 1500)
+            if printf '%s\n' "$names" | grep -qiE '(^|/)flash_all[^/]*\.sh$|(^|/)images/[^/]+\.img$'; then
+                kind=fastboot
+            elif [ "$sz" -ge 31457280 ] && printf '%s\n' "$names" | grep -qiE '(^|/)payload\.bin$|\.new\.dat(\.(br|xz|lzma))?$|^(system|super|vendor|product|boot)\.img$|META-INF/com/android/metadata$'; then
+                kind=sideload
             fi
-        elif [ "$(stat -c %s "$z" 2>/dev/null || echo 0)" -ge 104857600 ]; then kind=sideload
+        elif [ "$sz" -ge 104857600 ]; then
+            kind=sideload
         fi
         echo "${kind}|${z}" >> "$ZIPKIND_FILE"
     done < <(grep -iE '\.zip$' "$SCAN_FILE" || true)
@@ -292,6 +319,15 @@ classify_zips() {
 }
 zip_list() { [ -s "$ZIPKIND_FILE" ] && { grep "^$1|" "$ZIPKIND_FILE" | cut -d'|' -f2-; }; return 0; }
 scan_storage() {
+    # Re-use recent scan cache for fast restarts
+    if [ -s "$SCAN_FILE" ] && [ -s "$ZIPKIND_FILE" ]; then
+        local age=9999
+        age=$(( $(date +%s) - $(stat -c %Y "$SCAN_FILE" 2>/dev/null || echo 0) ))
+        if [ "$age" -lt "$SCAN_CACHE_SEC" ]; then
+            ok "Using cached scan ($(grep -c . "$SCAN_FILE" 2>/dev/null || echo 0) files, ${age}s old)."
+            return 0
+        fi
+    fi
     animate "Scanning phone storage" do_scan
     ok "Found $(grep -c . "$SCAN_FILE" 2>/dev/null || echo 0) flashable file(s)."
 }
@@ -1039,20 +1075,20 @@ setup_screen() {
 
 # ------------------------------ Main menu -------------------------------------
 ANIM=1
-mline() { echo -e "${M}$1 $2●${RESET} $(printf '%-18s' "$3") ${GRAY}$4${RESET}"; if [ "$ANIM" -eq 1 ]; then sleep 0.025; fi; return 0; }
-msec()  { echo -e "${M}${CYAN}── $1 ──${RESET}"; if [ "$ANIM" -eq 1 ]; then sleep 0.025; fi; return 0; }
+mline() { echo -e "${M}$1 $2●${RESET} $(printf '%-18s' "$3") ${GRAY}$4${RESET}"; if [ "$ANIM" -eq 1 ]; then sleep 0.012; fi; return 0; }
+msec()  { echo -e "${M}${CYAN}── $1 ──${RESET}"; if [ "$ANIM" -eq 1 ]; then sleep 0.012; fi; return 0; }
 
 main_menu() {
     clear; calc_layout; echo; echo -n "$M"
     typewriter " ANDROID ULTIMATE FLASHER  v${VERSION}"; echo
-    progress_bar "Starting" 20
+    progress_bar "Starting" 10
     lock_awake
     setup_tools
     type -P unzip >/dev/null 2>&1 || animate "Installing unzip" pkg install -y unzip
     setup_storage
     scan_storage
     if [ "$USB_MODE" = termux ]; then
-        say "Checking for a connected phone (tap Allow if asked)..."
+        # Quiet check - no extra spinner on every start
         if fb_present; then DEV_STATE=fastboot; elif adb_present; then DEV_STATE=adb; else DEV_STATE=none; fi
     fi
 
@@ -1104,20 +1140,35 @@ main_menu() {
             7) reboot_screen ;;         8) wipe_data_screen ;;
             9) setup_screen ;;
             c|C) if fb_present; then DEV_STATE=fastboot; elif adb_present; then DEV_STATE=adb; else DEV_STATE=none; fi
-                 say "Device: $DEV_STATE"; sleep 1 ;;
-            r|R) setup_storage; scan_storage; sleep 1 ;;
+                 say "Device: $DEV_STATE"; sleep 0.6 ;;
+            r|R) # force fresh scan (ignore cache)
+                 rm -f "$SCAN_FILE" "$ZIPKIND_FILE" 2>/dev/null
+                 setup_storage; scan_storage; sleep 0.5 ;;
             0) echo; typewriter " Goodbye!"; exit 0 ;;
-            *) bad "Invalid option."; sleep 1 ;;
+            *) bad "Invalid option."; sleep 0.6 ;;
         esac
     done
 }
 
-# Short command:  rudra
+# Short command:  rudra  (always keeps a working launcher even after Termux reinstall / storage clear)
 install_shortcut() {
     local self target="$BASE_DIR/setup.sh" bin="${PREFIX:-/data/data/com.termux/files/usr}/bin"
     self="$(realpath "$0" 2>/dev/null || echo "")"
-    if [ -f "$0" ] && [ -n "$self" ] && [ "$self" != "$(realpath "$target" 2>/dev/null || echo x)" ]; then cp "$0" "$target" 2>/dev/null || true; fi
-    if [ -f "$target" ]; then chmod +x "$target" 2>/dev/null || true; mkdir -p "$bin"; ln -sf "$target" "$bin/rudra" 2>/dev/null || true; fi
+    if [ -f "$0" ] && [ -n "$self" ] && [ "$self" != "$(realpath "$target" 2>/dev/null || echo x)" ]; then
+        cp "$0" "$target" 2>/dev/null || true
+    fi
+    if [ -f "$target" ]; then
+        chmod +x "$target" 2>/dev/null || true
+        mkdir -p "$bin"
+        # Create a small wrapper so 'rudra' always works even if $PREFIX/bin is cleaned
+        cat > "$bin/rudra" << 'WRAPPER'
+#!/data/data/com.termux/files/usr/bin/bash
+exec bash "$HOME/.android-ultimate-flashing-tool/setup.sh" "$@"
+WRAPPER
+        chmod +x "$bin/rudra" 2>/dev/null || true
+        # also keep the symlink as fallback
+        ln -sf "$target" "$bin/rudra-bin" 2>/dev/null || true
+    fi
     return 0
 }
 
@@ -1132,20 +1183,20 @@ check_update() {
             [ -f "$f" ] || continue
             mt=$(stat -c %Y "$f" 2>/dev/null || echo 0)
             if [ "$mt" -gt "$newest" ]; then newest="$mt"; cand="$f"; fi
-        done < <(find -L "$d" -maxdepth 2 -type f -iname 'android_flasher*.sh' 2>/dev/null)
+        done < <(find -L "$d" -maxdepth 2 -type f \( -iname 'android_flasher*.sh' -o -iname 'android_ultimate_flasher*.sh' -o -iname 'setup.sh' \) 2>/dev/null)
         [ -n "$cand" ] && break
     done
     [ -n "$cand" ] || return 0
     [ "$cand" -nt "$target" ] || return 0
     cmp -s "$cand" "$target" && return 0
-    grep -q 'Android Ultimate Flasher' "$cand" 2>/dev/null || return 0
+    grep -qE 'Android Ultimate Flasher|VERSION=' "$cand" 2>/dev/null || return 0
     bash -n "$cand" 2>/dev/null || return 0
     [ "$(cat "$BASE_DIR/.skip_update" 2>/dev/null)" = "$newest" ] && return 0
     echo -e "${YELLOW}[!]${RESET} A newer tool file was found in Download:"
     echo -e " ${BOLD}$(basename "$cand")${RESET} ${GRAY}($(date -d "@$newest" '+%d %b %H:%M' 2>/dev/null))${RESET}"
     if ask_yn "Update to it now?" y; then
         if cp "$cand" "$target" && chmod +x "$target"; then
-            ok "Updated. Restarting..."; sleep 1
+            ok "Updated. Restarting..."; sleep 0.8
             exec bash "$target"
         fi
         bad "Update failed."
@@ -1157,4 +1208,5 @@ check_update() {
 
 install_shortcut
 if [[ "${BASH_SOURCE[0]:-$0}" == "$0" ]]; then check_update; main_menu; fi
+
 
