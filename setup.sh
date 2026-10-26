@@ -112,41 +112,45 @@ adb()      { if [ "$USB_MODE" = termux ]; then termux-adb "$@"; else command adb
 detect_usb_mode
 
 # Installs everything automatically (first start, or menu 9)
-# Fully non-interactive — no Y/N prompts for beginners
+# Extremely light + 100% non-interactive (never shows config Y/N prompts)
 setup_tools() { # setup_tools [force]
     local marker="$BASE_DIR/.setup_done" force="${1:-}"
     if [ -z "$force" ] && [ -f "$marker" ] && type -P fastboot >/dev/null 2>&1; then return 0; fi
 
     export DEBIAN_FRONTEND=noninteractive
-    # Force package maintainer config files so openssl.cnf etc never ask questions
     export APT_LISTCHANGES_FRONTEND=none
-    local APT_OPTS='-o Dpkg::Options::=--force-confnew -o Dpkg::Options::=--force-confdef'
 
-    _silent_pkg() {
-        # $1 = action (install/reinstall), rest = packages
-        local action="$1"; shift
-        bash -c "apt-get $APT_OPTS -y $action $* >/dev/null 2>&1 || pkg $action -y $* >/dev/null 2>&1" || true
-    }
-
-    # Fix common broken curl / openssl / adb after Termux updates (silent)
-    if ! type -P curl >/dev/null 2>&1 || ! curl --version >/dev/null 2>&1; then
-        animate "Fixing curl" _silent_pkg reinstall openssl libcurl curl
-        type -P curl >/dev/null 2>&1 || _silent_pkg install curl
+    # Only install missing packages. Never reinstall openssl / bash / curl
+    # (reinstall is what triggers the confusing config file prompts)
+    if ! type -P fastboot >/dev/null 2>&1; then
+        animate "Installing android-tools" pkg install -y android-tools
     fi
-    if type -P adb >/dev/null 2>&1 && ! adb version >/dev/null 2>&1; then
-        animate "Fixing android-tools" _silent_pkg reinstall android-tools
+    if ! type -P termux-usb >/dev/null 2>&1; then
+        animate "Installing termux-api" pkg install -y termux-api
+    fi
+    if ! type -P curl >/dev/null 2>&1; then
+        animate "Installing curl" pkg install -y curl
+    fi
+    if ! type -P unzip >/dev/null 2>&1; then
+        animate "Installing unzip" pkg install -y unzip
     fi
 
-    type -P fastboot >/dev/null 2>&1 || animate "Installing android-tools" bash -c "pkg update -y >/dev/null 2>&1; pkg install -y android-tools"
-    type -P termux-usb >/dev/null 2>&1 || animate "Installing termux-api" pkg install -y termux-api
+    # USB helper only if missing
     if ! type -P termux-fastboot >/dev/null 2>&1; then
-        type -P curl >/dev/null 2>&1 || animate "Installing curl" pkg install -y curl
-        animate "Installing USB helper (no-root)" bash -c "curl -fsSL https://raw.githubusercontent.com/nohajc/termux-adb/master/install.sh | bash" || \
-            warn "USB helper install failed (check internet / run menu 9 later)."
+        if type -P curl >/dev/null 2>&1; then
+            animate "Installing USB helper" bash -c "curl -fsSL --connect-timeout 12 --max-time 45 https://raw.githubusercontent.com/nohajc/termux-adb/master/install.sh | bash" || \
+                warn "USB helper skipped (you can still use normal fastboot)."
+        fi
     fi
-    hash -r; detect_usb_mode; touch "$marker"
-    if [ "$USB_MODE" = termux ]; then ok "USB helper ready (no-root mode)."
-    else warn "USB helper not installed (check internet). Menu 9 retries."; fi
+
+    hash -r
+    detect_usb_mode
+    touch "$marker"
+    if [ "$USB_MODE" = termux ]; then
+        ok "USB helper ready (no-root mode)."
+    else
+        ok "Tools ready."
+    fi
 }
 
 fb_present()       { fastboot devices 2>/dev/null | grep -q "fastboot"; }
