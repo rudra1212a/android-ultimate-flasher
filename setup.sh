@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Android Ultimate Flasher - Version 1.1
-# Termux tool. Run once:  bash android_flasher_v1.1.sh   -> afterwards just: rudra
+# Android Ultimate Flasher - Version 1.0
+# Termux tool. Run once:  bash android_flasher_v1.0.sh   -> afterwards just: rudra
 # ==============================================================================
 
 set -uo pipefail
 
-VERSION="1.1"
+VERSION="1.0"
 BASE_DIR="$HOME/.android-ultimate-flashing-tool"
 ROMS_DIR="$HOME/flasher_roms"
 LOG_FILE="$BASE_DIR/tool.log"
