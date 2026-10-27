@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Android Ultimate Flasher - Version 1.1
+# Android Ultimate Flasher - Version 1.2
 # Termux tool. Run once:  bash android_flasher_v1.1.sh   -> afterwards just: rudra
-# v1.1: auto-fix for "cannot locate symbol SSL_set_quic_tls_early_data_enabled"
-#       (openssl/libcurl mismatch), empty-list crash fix in pick_index.
+# v1.2: fast start, no decoration animations, no wake-lock notification at start
+#       (only held while flashing), works even when the "sleep" binary is missing,
+#       auto-repair of openssl/curl and missing basic tools.
 # ==============================================================================
 
 set -uo pipefail
 
-VERSION="1.1"
+VERSION="1.2"
 BASE_DIR="$HOME/.android-ultimate-flashing-tool"
 ROMS_DIR="$HOME/flasher_roms"
 LOG_FILE="$BASE_DIR/tool.log"
@@ -28,6 +29,11 @@ RED='\033[1;31m'; GREEN='\033[1;32m'; YELLOW='\033[1;33m'; BLUE='\033[1;34m'
 CYAN='\033[1;36m'; GRAY='\033[1;90m'; BOLD='\033[1m'; RESET='\033[0m'
 SPIN=("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
 US=$'\x1f'
+
+# "sleep" fallback: some broken Termux installs lose /usr/bin/sleep (error: sleep: No such file).
+# Then use a pure-bash wait so the tool never spams errors or busy-loops.
+HAVE_SLEEP=0; type -P sleep >/dev/null 2>&1 && HAVE_SLEEP=1
+sleep() { if [ "$HAVE_SLEEP" = 1 ]; then command sleep "$@"; else read -rt "${1:-1}" <> <(:) || true; fi; }
 
 say()  { echo -e "${BLUE}[*]${RESET} $*"; echo "[INFO] $*" >> "$LOG_FILE"; }
 ok()   { echo -e "${GREEN}[+]${RESET} $*"; echo "[OK] $*" >> "$LOG_FILE"; }
@@ -85,17 +91,6 @@ animate() {
     printf "\r\033[K\033[?25h"
     return $rc
 }
-progress_bar() {
-    local msg="$1" n="${2:-24}" i
-    printf '\033[?25l'
-    for ((i = 0; i <= n; i++)); do
-        printf "\r\033[K${CYAN}[*]${RESET} %s ${GREEN}%s${GRAY}%s${RESET} %3d%%" \
-            "$msg" "$(hline "$i" "█")" "$(hline "$((n - i))" "░")" "$((i * 100 / n))"
-        sleep 0.02
-    done
-    echo; printf '\033[?25h'
-}
-typewriter() { local i; for ((i = 0; i < ${#1}; i++)); do printf "%s" "${1:$i:1}"; sleep 0.012; done; echo; }
 pause() { if [ -t 0 ]; then echo; read -n 1 -s -r -p "Press any key to continue..."; echo; fi; return 0; }
 ask_yn() { # ask_yn "question" [y|n = default]
     local def="${2:-n}" hint="(y/N)" a
@@ -145,6 +140,27 @@ fix_ssl() {
 # returns 0 when curl really works (the broken-library case makes this fail)
 curl_ok() { curl --version >/dev/null 2>&1; }
 
+# Basic tools check (coreutils etc.). Installs only what is really missing.
+ensure_base() {
+    local need=() c
+    for c in sleep stat du df timeout tr cut sort head tail basename dirname realpath; do
+        type -P "$c" >/dev/null 2>&1 || { need+=(coreutils); break; }
+    done
+    type -P find >/dev/null 2>&1 || need+=(findutils)
+    type -P grep >/dev/null 2>&1 || need+=(grep)
+    type -P awk  >/dev/null 2>&1 || need+=(gawk)
+    type -P sed  >/dev/null 2>&1 || need+=(sed)
+    type -P tput >/dev/null 2>&1 || need+=(ncurses-utils)
+    type -P tar  >/dev/null 2>&1 || need+=(tar)
+    [ "${#need[@]}" -eq 0 ] && return 0
+    warn "Basic tools missing: ${need[*]} - installing..."
+    animate "Installing ${need[*]}" apt_install "${need[@]}" \
+        || { warn "Install failed. Run:  pkg install -y ${need[*]}"; tail -n 3 "$LAST_OUT"; }
+    hash -r
+    type -P sleep >/dev/null 2>&1 && HAVE_SLEEP=1
+    return 0
+}
+
 # USB helper (no-root): download with timeouts, never hangs forever
 install_helper() {
     local f="$BASE_DIR/termux-adb-install.sh"
@@ -158,7 +174,9 @@ setup_tools() { # setup_tools [force]
     local marker="$BASE_DIR/.setup_done" force="${1:-}" need=()
 
     # Auto-repair broken curl/openssl (runs on every start, costs nothing when curl works)
-    if ! curl_ok; then
+    local stamp="$BASE_DIR/.ssl_tried"
+    if ! curl_ok && { [ -n "$force" ] || [ -z "$(find "$stamp" -mmin -60 2>/dev/null)" ]; }; then
+        touch "$stamp"
         warn "curl/openssl is broken (library mismatch). Repairing..."
         animate "Fixing Termux packages (openssl/curl)" fix_ssl \
             || { warn "Repair failed. Run manually:  pkg upgrade -y && pkg install -y openssl libcurl curl git"; tail -n 3 "$LAST_OUT"; }
@@ -278,7 +296,7 @@ wait_for_device() {
         if [ $((i % chk)) -eq 0 ]; then
             if _here; then
                 printf "\r\033[K\033[?25h"
-                device_card; sleep 0.6; return 0
+                device_card; return 0
             fi
             if [ "$USB_MODE" = termux ]; then
                 if usb_seen; then
@@ -1040,7 +1058,7 @@ flash_gsi_screen() {
 device_info_screen() {
     header "Device Information"
     wait_for_device fastboot || return 0
-    echo; progress_bar "Reading device info" 16
+    echo
     echo -e "\n ${CYAN}$(hline $((COLS - 2)) "─")${RESET}"
     echo -e "  Product  : ${BOLD}$(fb_var product)${RESET}\n  Serial   : ${BOLD}$(fb_var serialno)${RESET}"
     echo -e "  Slot     : ${BOLD}$(fb_var current-slot)${RESET}\n  Unlocked : ${BOLD}$(fb_var unlocked)${RESET}"
@@ -1111,41 +1129,38 @@ setup_screen() {
 }
 
 # ------------------------------ Main menu -------------------------------------
-ANIM=1
-mline() { echo -e "${M}$1 $2●${RESET} $(printf '%-18s' "$3") ${GRAY}$4${RESET}"; if [ "$ANIM" -eq 1 ]; then sleep 0.025; fi; return 0; }
-msec()  { echo -e "${M}${CYAN}── $1 ──${RESET}"; if [ "$ANIM" -eq 1 ]; then sleep 0.025; fi; return 0; }
+mline() { echo -e "${M}$1 $2●${RESET} $(printf '%-18s' "$3") ${GRAY}$4${RESET}"; }
+msec()  { echo -e "${M}${CYAN}── $1 ──${RESET}"; }
+
+# Quick device check with timeouts (never hangs)
+check_device() {
+    local fbc=fastboot adc=adb fo ao
+    [ "$USB_MODE" = termux ] && { fbc=termux-fastboot; adc=termux-adb; }
+    say "Checking device (tap Allow if asked)..."
+    fo=$(timeout 8 "$fbc" devices 2>/dev/null) || true
+    if [[ "$fo" == *fastboot* ]]; then DEV_STATE=fastboot; return 0; fi
+    ao=$(timeout 8 "$adc" devices 2>/dev/null | awk 'NR>1 && ($2=="device"||$2=="sideload"||$2=="recovery"){print "yes"; exit}') || true
+    if [ "${ao:-}" = yes ]; then DEV_STATE=adb; else DEV_STATE=none; fi
+    return 0
+}
 
 main_menu() {
-    local n
-    clear; calc_layout; echo; echo -n "$M"
-    typewriter " ANDROID ULTIMATE FLASHER  v${VERSION}"; echo
-    progress_bar "Starting" 20
-    lock_awake
+    clear; calc_layout
+    ensure_base
     setup_tools
     type -P unzip >/dev/null 2>&1 || animate "Installing unzip" apt_install unzip
     setup_storage
     rm -f "$RT_STAMP"
     if [ -s "$SCAN_FILE" ]; then
-        # fast start: show the last result at once, refresh the list quietly in the background
-        n=$(grep -c . "$SCAN_FILE" 2>/dev/null) || true
-        ok "Found ${n:-0} flashable file(s)."
+        # fast start: use the last result, refresh the list quietly in the background
         ( do_scan ) > /dev/null 2>&1 < /dev/null &
         disown 2>/dev/null || true
     else
         scan_storage
     fi
-    if [ "$USB_MODE" = termux ]; then
-        say "Checking for a connected phone (tap Allow if asked)..."
-        local fo ao
-        fo=$(timeout 4 termux-fastboot devices 2>/dev/null) || true
-        if [[ "$fo" == *fastboot* ]]; then DEV_STATE=fastboot
-        else
-            ao=$(timeout 4 termux-adb devices 2>/dev/null | awk 'NR>1 && ($2=="device"||$2=="sideload"||$2=="recovery"){print "yes"; exit}') || true
-            if [ "${ao:-}" = yes ]; then DEV_STATE=adb; else DEV_STATE=none; fi
-        fi
-    fi
 
     while true; do
+        unlock_awake        # wake lock (and its notification) only exists while flashing
         # ---- all slow work happens BEFORE clearing (the screen is never blank) ----
         if [ ! -f "$RT_STAMP" ] || [ "$SCAN_FILE" -nt "$RT_STAMP" ] || [ "$ZIPKIND_FILE" -nt "$RT_STAMP" ]; then
             refresh_rom_trees; touch "$RT_STAMP"
@@ -1163,16 +1178,15 @@ main_menu() {
         [ "$DEV_STATE" = fastboot ] && fb=1
         [ "$DEV_STATE" = adb ] && ad=1
         # dots = tool installed (green) / missing (red)
-        local d1="${RED}●${RESET}" d2="${RED}●${RESET}" d3="${RED}●${RESET}" dev="${RED}Not connected${RESET}"
+        local d1="${RED}●${RESET}" d2="${RED}●${RESET}" dev="${RED}Not connected${RESET}"
         if type -P fastboot >/dev/null 2>&1 || type -P termux-fastboot >/dev/null 2>&1; then d1="${GREEN}●${RESET}"; fi
         if type -P adb >/dev/null 2>&1 || type -P termux-adb >/dev/null 2>&1; then d2="${GREEN}●${RESET}"; fi
-        if command -v python3 >/dev/null 2>&1; then d3="${GREEN}●${RESET}"; fi
         [ "$fb" -eq 1 ] && dev="${GREEN}Connected (fastboot)${RESET}"
         [ "$ad" -eq 1 ] && dev="${GREEN}Connected (adb)${RESET}"
         [ "$DEV_STATE" = unchecked ] && dev="${GRAY}Not checked (press c)${RESET}"
 
         draw_box "ANDROID ULTIMATE FLASHER" "Version ${VERSION} - Created by Rudra"
-        echo -e "\n${M}Tools    $d1 fastboot  $d2 adb  $d3 python"
+        echo -e "\n${M}Tools    $d1 fastboot  $d2 adb"
         echo -e "${M}USB      ${USB_MODE} mode\n${M}Device   $dev"
         echo -e "${M}Phone    ${n_img} img • ${n_zip} zip • ${#ROM_PATH[@]} rom • ${n_gsi} gsi"
         [ -f "$RESUME_FILE" ] && echo -e "${M}${YELLOW}⚠ Unfinished flash found - open 3 to resume${RESET}"
@@ -1192,7 +1206,6 @@ main_menu() {
         mline 0 "$GREEN"  "Exit"             "quit application"
         echo -e "\n${M}${GREEN}●${RESET} Safe  ${YELLOW}●${RESET} Careful  ${RED}●${RESET} Erases data"
         echo -e "${M}${GRAY}r = rescan phone   c = check device${RESET}\n"
-        ANIM=0
         local o; printf "%s Select: " "$M"; read -r o || exit 0
         case "$o" in
             1) flash_image_screen ;;    2) flash_sideload_screen ;;
@@ -1200,10 +1213,9 @@ main_menu() {
             5) device_info_screen ;;    6) switch_slot_screen ;;
             7) reboot_screen ;;         8) wipe_data_screen ;;
             9) setup_screen ;;
-            c|C) if fb_present; then DEV_STATE=fastboot; elif adb_present; then DEV_STATE=adb; else DEV_STATE=none; fi
-                 say "Device: $DEV_STATE"; sleep 1 ;;
+            c|C) check_device; say "Device: $DEV_STATE"; sleep 1 ;;
             r|R) setup_storage; scan_storage; sleep 1 ;;
-            0) echo; typewriter " Goodbye!"; exit 0 ;;
+            0) echo " Goodbye!"; exit 0 ;;
             *) bad "Invalid option."; sleep 1 ;;
         esac
     done
