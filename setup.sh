@@ -1,20 +1,12 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Android Ultimate Flasher - Version 1.5
-# Termux tool. Run once:  bash android_flasher_v1.1.sh   -> afterwards just: rudra
-# v1.5: archive AND its extracted folder are both listed (archive marked "extracted");
-#       extracted ROM folders are never deleted by the tool.
-# v1.4: first start no longer freezes (big .tgz archives are checked once, with a time limit,
-#       during the scan - never on the blank screen); broken "sleep" binary detected and repaired.
-# v1.3: live PERCENT bars (extracting / decompressing / flashing), faster scan + menu.
-# v1.2: fast start, no decoration animations, no wake-lock notification at start
-#       (only held while flashing), works even when the "sleep" binary is missing,
-#       auto-repair of openssl/curl and missing basic tools.
+# Android Ultimate Flasher - Version 1.0
+# Termux tool. Run once:  bash android_flasher_v1.0.sh   -> afterwards just: rudra
 # ==============================================================================
 
 set -uo pipefail
 
-VERSION="1.5"
+VERSION="1.0"
 BASE_DIR="$HOME/.android-ultimate-flashing-tool"
 ROMS_DIR="$HOME/flasher_roms"
 LOG_FILE="$BASE_DIR/tool.log"
@@ -698,7 +690,7 @@ sideload_zips() {
     done < <(zip_list sideload)
 }
 pick_image() {
-    local cand=() dirs=() files=() f d n p
+    local cand=() f rel
     mapfile -t cand < <(standalone_imgs)
     if [ "${#cand[@]}" -eq 0 ]; then
         warn "No standalone image (.img) found on your phone."
@@ -706,30 +698,16 @@ pick_image() {
         echo -e " ${GRAY}Copy your image to the phone, then press 'r' in the main menu.${RESET}"
         return 1
     fi
-    mapfile -t dirs < <(for f in "${cand[@]}"; do dirname "$f"; done | sort -u)
-
-    while true; do
-        d=""
-        if [ "${#dirs[@]}" -eq 1 ]; then d="${dirs[0]}"; else
-            LIST=()
-            for f in "${dirs[@]}"; do
-                n=0; for p in "${cand[@]}"; do [ "$(dirname "$p")" = "$f" ] && n=$((n + 1)); done
-                if [ "$f" = "$STORAGE_ROOT" ]; then LIST+=("(phone storage) ${GRAY}(${n} img)${RESET}")
-                else LIST+=("$(shorten "${f#"$STORAGE_ROOT"/}" $((COLS - 22))) ${GRAY}(${n} img)${RESET}"); fi
-            done
-            echo -e " ${CYAN}Choose the folder:${RESET}\n"
-            pick_index "Select folder" || return 1
-            d="${dirs[$IDX]}"
-        fi
-        files=()
-        for f in "${cand[@]}"; do [ "$(dirname "$f")" = "$d" ] && files+=("$f"); done
-        LIST=()
-        for f in "${files[@]}"; do LIST+=("${GRAY}$(printf '%6s' "$(human_size "$f")")${RESET} $(shorten "$(basename "$f")" $((COLS - 16)))"); done
-        echo -e "\n ${CYAN}Images in:${RESET} ${GRAY}$(shorten "${d#"$STORAGE_ROOT"/}" $((COLS - 14)))${RESET}\n"
-        if pick_index "Select image"; then PICKED="${files[$IDX]}"; return 0; fi
-        [ "${#dirs[@]}" -eq 1 ] && return 1
-        echo
+    # ONE list with every image from every folder (folder shown under each name)
+    LIST=()
+    for f in "${cand[@]}"; do
+        rel="$(dirname "${f#"$STORAGE_ROOT"/}")"; [ "$rel" = "." ] && rel="phone storage"
+        LIST+=("${GRAY}$(printf '%6s' "$(human_size "$f")")${RESET} $(shorten "$(basename "$f")" $((COLS - 16)))\n          ${GRAY}in $(shorten "$rel" $((COLS - 16)))${RESET}")
     done
+    echo -e " ${CYAN}All images on your phone (${#cand[@]}):${RESET}\n"
+    pick_index "Select image" || return 1
+    PICKED="${cand[$IDX]}"
+    return 0
 }
 
 CRITICAL="bootloader|xbl|xbl_config|abl|modem|persist|efs|modemst1|modemst2|fsg|sbl1|tz|aboot|rpm|hyp|devcfg|keymaster|preloader|lk|nvram|nvdata|proinfo|protect1|protect2|seccfg"
