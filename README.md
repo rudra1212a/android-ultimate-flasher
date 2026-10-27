@@ -1,6 +1,6 @@
 # 🚀 Android Ultimate Flasher
 
-> **Version:** 1.5 
+> **Version:** 1.0 
 > **Crafted by:** Rudra (`rudra1212a`)  
 > **Platform:** Termux (Android)
 
