@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Android Ultimate Flasher - Version 1.4
+# Android Ultimate Flasher - Version 1.5
 # Termux tool. Run once:  bash android_flasher_v1.1.sh   -> afterwards just: rudra
+# v1.5: archive AND its extracted folder are both listed (archive marked "extracted");
+#       extracted ROM folders are never deleted by the tool.
 # v1.4: first start no longer freezes (big .tgz archives are checked once, with a time limit,
 #       during the scan - never on the blank screen); broken "sleep" binary detected and repaired.
 # v1.3: live PERCENT bars (extracting / decompressing / flashing), faster scan + menu.
@@ -12,7 +14,7 @@
 
 set -uo pipefail
 
-VERSION="1.4"
+VERSION="1.5"
 BASE_DIR="$HOME/.android-ultimate-flashing-tool"
 ROMS_DIR="$HOME/flasher_roms"
 LOG_FILE="$BASE_DIR/tool.log"
@@ -516,9 +518,20 @@ classify_tars() {
         archive_classify "$f"
     done < <(scan_list '\.(tgz|tar\.gz|tar)$')
 }
+# Where did this archive already get extracted?  prints the flash_all file path, or returns 1
+arc_extracted_dir() {
+    local arc="$1" base cand found
+    base="$(basename "$arc")"; base="${base%.tar.gz}"; base="${base%.tgz}"; base="${base%.tar}"; base="${base%.zip}"
+    for cand in "$STORAGE_ROOT/Download/${base}"_extracted* "$(dirname "$arc")/${base}"_extracted* "$ROMS_DIR/$base"; do
+        [ -d "$cand" ] || continue
+        found=$(find -L "$cand" -maxdepth 6 -type f -iname 'flash_all*.sh' 2>/dev/null | head -n1)
+        if [ -n "$found" ]; then printf '%s\n' "$found"; return 0; fi
+    done
+    return 1
+}
 collect_roms() {
     ROM_KIND=(); ROM_PATH=()
-    local f d n p base hide seen=$'\n' i j dup
+    local f d n base seen=$'\n' i j dup
     local tk=() tp=()
 
     # 1) extracted ROMs: flash_all.sh next to an images folder (or several image files)
@@ -551,9 +564,6 @@ collect_roms() {
         [ "$(stat -c %s "$f" 2>/dev/null || echo 0)" -ge $((MIN_ARCHIVE_MB * 1048576)) ] || continue
         case "${f,,}" in *.zip) ;; *) archive_has_script "$f" || continue ;; esac
         base="$(basename "$f")"; base="${base%.tar.gz}"; base="${base%.tgz}"; base="${base%.tar}"; base="${base%.zip}"
-        hide=0
-        for p in "${ROM_PATH[@]}"; do [[ "$p" == *"/$base"* ]] && { hide=1; break; }; done
-        [ "$hide" -eq 0 ] || continue
         ROM_KIND+=(arc); ROM_PATH+=("$f")
     done < <({ scan_list '\.(tgz|tar\.gz|tar)$'; zip_list fastboot; } | sort -u)
 }
@@ -840,12 +850,8 @@ extract_archive() {
     base="$(basename "$arc")"; base="${base%.tar.gz}"; base="${base%.tgz}"; base="${base%.tar}"; base="${base%.zip}"
     dl="$STORAGE_ROOT/Download"; mkdir -p "$dl" 2>/dev/null
 
-    # already extracted somewhere?
-    found=""
-    for cand in "$dl/${base}_extracted" "$(dirname "$arc")/${base}_extracted" "$ROMS_DIR/$base"; do
-        found=$(find -L "$cand" -maxdepth 6 -type f -iname 'flash_all*.sh' 2>/dev/null | head -n1)
-        [ -n "$found" ] && break
-    done
+    # already extracted somewhere? (the extracted folder is KEPT - never deleted by this tool)
+    found=$(arc_extracted_dir "$arc") || found=""
     if [ -n "$found" ]; then
         ok "This ROM is already extracted:"
         echo -e " ${BOLD}$(dirname "$found" | sed "s#^$STORAGE_ROOT/##")${RESET}"
@@ -1037,21 +1043,22 @@ flash_fastboot_screen() {
         pause; return 0
     fi
     LIST=()
-    local i k
+    local i k x
     for ((i = 0; i < ${#ROM_PATH[@]}; i++)); do
         case "${ROM_KIND[$i]}" in
             script) k="${GREEN}FOLDER ${RESET}" ;;
             *)      k="${YELLOW}ARCHIVE${RESET}" ;;
         esac
         if [ "${ROM_KIND[$i]}" = arc ]; then
-            LIST+=("$k $(shorten "$(basename "${ROM_PATH[$i]}")" $((COLS - 28))) ${GRAY}$(human_size "${ROM_PATH[$i]}")${RESET}")
+            if arc_extracted_dir "${ROM_PATH[$i]}" >/dev/null; then k="${YELLOW}ARCHIVE${RESET}"; x=" ${GREEN}✔extracted${RESET}"; else x=""; fi
+            LIST+=("$k $(shorten "$(basename "${ROM_PATH[$i]}")" $((COLS - 40))) ${GRAY}$(human_size "${ROM_PATH[$i]}")${RESET}$x")
         else
             LIST+=("$k $(shorten "$(basename "${ROM_PATH[$i]}")" $((COLS - 20)))")
         fi
     done
     echo -e " ${CYAN}Fastboot ROMs on your phone:${RESET}"
     echo -e " ${GRAY}FOLDER = already extracted (flashes directly)${RESET}"
-    echo -e " ${GRAY}ARCHIVE = will be extracted into Download first${RESET}\n"
+    echo -e " ${GRAY}ARCHIVE = extracted into Download first (folder is kept)${RESET}\n"
     pick_index "Select ROM" || { say "Cancelled."; pause; return 0; }
     local sel="${ROM_PATH[$IDX]}"
     R_KIND="${ROM_KIND[$IDX]}"; R_SRC="$sel"; R_TEMP=0
