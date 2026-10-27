@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Android Ultimate Flasher - Version 1.2
+# Android Ultimate Flasher - Version 1.3
 # Termux tool. Run once:  bash android_flasher_v1.1.sh   -> afterwards just: rudra
+# v1.3: live PERCENT bars (extracting / decompressing / flashing), faster scan + menu.
 # v1.2: fast start, no decoration animations, no wake-lock notification at start
 #       (only held while flashing), works even when the "sleep" binary is missing,
 #       auto-repair of openssl/curl and missing basic tools.
@@ -9,7 +10,7 @@
 
 set -uo pipefail
 
-VERSION="1.2"
+VERSION="1.3"
 BASE_DIR="$HOME/.android-ultimate-flashing-tool"
 ROMS_DIR="$HOME/flasher_roms"
 LOG_FILE="$BASE_DIR/tool.log"
@@ -77,18 +78,104 @@ draw_box() {
 header() { clear; calc_layout; draw_box "$1"; echo ""; }
 
 # ------------------------------ Animations ------------------------------------
-# Runs a command in the background (never touches the keyboard) with a spinner
+PROG_N=0; PROG_TOTAL=0      # overall step counter for the flashing percent bar (0 = off)
+make_bar() { # make_bar <percent> <width>
+    local p=$1 w=$2 f
+    [ "$p" -gt 100 ] && p=100; [ "$p" -lt 0 ] && p=0
+    f=$(( p * w / 100 ))
+    printf '%s%s' "$(hline "$f" "█")" "$(hline "$((w - f))" "░")"
+}
+# Runs a command in the background with a spinner. While flashing it also shows a PERCENT bar:
+# fastboot "Sending sparse N/M" gives the exact part, PROG_N/PROG_TOTAL the overall step.
 animate() {
-    local msg; msg=$(shorten "$1" $((COLS - 14))); shift
+    local msg pid i=0 t=$SECONDS pct=-1 sp chunk a b
+    msg=$(shorten "$1" $((COLS - 30))); shift
     ("$@") > "$LAST_OUT" 2>&1 < /dev/null &
-    local pid=$! i=0 t=$SECONDS
+    pid=$!
     printf '\033[?25l'
     while kill -0 "$pid" 2>/dev/null; do
-        printf "\r\033[K${CYAN}[%s]${RESET} %s ${GRAY}%ss${RESET}" "${SPIN[$((i % 10))]}" "$msg" "$((SECONDS - t))"
+        if [ $((i % 8)) -eq 0 ]; then
+            sp=-1
+            chunk=$(tail -c 400 "$LAST_OUT" 2>/dev/null | tr '\r' '\n' | sed -nE "s/.*Sending sparse '[^']*' ([0-9]+)\/([0-9]+).*/\1 \2/p" | tail -n1)
+            if [ -n "$chunk" ]; then read -r a b <<< "$chunk"; [ "${b:-0}" -gt 0 ] && sp=$(( (a - 1) * 100 / b )); fi
+            if [ "$PROG_TOTAL" -gt 0 ]; then pct=$(( ((PROG_N - 1) * 100 + (sp > 0 ? sp : 0)) / PROG_TOTAL ))
+            elif [ "$sp" -ge 0 ]; then pct=$sp; else pct=-1; fi
+        fi
+        if [ "$pct" -ge 0 ]; then
+            printf "\r\033[K${CYAN}[%s]${RESET} %s ${GREEN}%s${RESET} %3d%% ${GRAY}%ss${RESET}" \
+                "${SPIN[$((i % 10))]}" "$msg" "$(make_bar "$pct" 10)" "$pct" "$((SECONDS - t))"
+        else
+            printf "\r\033[K${CYAN}[%s]${RESET} %s ${GRAY}%ss${RESET}" "${SPIN[$((i % 10))]}" "$msg" "$((SECONDS - t))"
+        fi
         i=$((i + 1)); sleep 0.1
     done
     wait "$pid"; local rc=$?
     printf "\r\033[K\033[?25h"
+    return $rc
+}
+
+# How far has a process read a file? (bytes; looks at /proc fdinfo of every open fd of that inode)
+fd_pos() { # fd_pos <inode>
+    local f g best=0 k v
+    while IFS= read -r f; do
+        g="${f/\/fd\//\/fdinfo\/}"
+        [ -r "$g" ] || continue
+        while read -r k v; do
+            if [ "$k" = "pos:" ]; then [[ "$v" =~ ^[0-9]+$ ]] && [ "$v" -gt "$best" ] && best=$v; break; fi
+        done < "$g"
+    done < <(stat -L -c '%i %n' /proc/[0-9]*/fd/* 2>/dev/null | awk -v i="$1" '$1==i{print $2}')
+    echo "$best"
+}
+
+# Shows "label ███░░░ 42% current-file 12s" for a background job.
+#   mode fd  = percent from how much of the archive was read      (tar / tgz / xz / gz)
+#   mode dir = percent from bytes written into <dest> vs <total>   (zip)
+watch_proc() { # watch_proc <pid> <label> <archive> <fd|dir> <dest> <total_bytes>
+    local pid="$1" label="$2" arc="$3" mode="$4" dest="$5" total="${6:-0}"
+    local i=0 t=$SECONDS pct=-1 name="" inode sz pos b nw
+    inode=$(stat -L -c %i "$arc" 2>/dev/null || echo 0); sz=$(stat -c %s "$arc" 2>/dev/null || echo 0)
+    nw=$((COLS - 38)); [ "$nw" -lt 6 ] && nw=6
+    printf '\033[?25l'
+    while kill -0 "$pid" 2>/dev/null; do
+        if [ $((i % 6)) -eq 0 ]; then
+            pct=-1
+            if [ "$mode" = dir ] && [ "$total" -gt 0 ]; then
+                b=$(du -sb "$dest" 2>/dev/null | cut -f1); pct=$(( ${b:-0} * 100 / total ))
+            elif [ "$mode" = fd ] && [ "$sz" -gt 0 ]; then
+                pos=$(fd_pos "$inode"); [ "$pos" -gt 0 ] && pct=$(( pos * 100 / sz ))
+            fi
+            [ "$pct" -gt 99 ] && pct=99
+            name=$(tail -n1 "$LAST_OUT" 2>/dev/null | tr -d '\r'); name="${name##*: }"; name="${name##*/}"; name="${name%"${name##*[![:space:]]}"}"
+            [ -n "$name" ] && name=$(shorten "$name" "$nw")
+        fi
+        if [ "$pct" -ge 0 ]; then
+            printf "\r\033[K${CYAN}[%s]${RESET} %s ${GREEN}%s${RESET} %3d%% ${GRAY}%s %ss${RESET}" \
+                "${SPIN[$((i % 10))]}" "$label" "$(make_bar "$pct" 10)" "$pct" "$name" "$((SECONDS - t))"
+        else
+            printf "\r\033[K${CYAN}[%s]${RESET} %s ${GRAY}%s %ss${RESET}" "${SPIN[$((i % 10))]}" "$label" "$name" "$((SECONDS - t))"
+        fi
+        i=$((i + 1)); sleep 0.1
+    done
+    printf "\r\033[K\033[?25h"
+}
+
+# Extract with live percent + current file name.  Returns the extractor's exit code.
+extract_progress() { # extract_progress <archive> <dest>
+    local arc="$1" dest="$2" total=0 pid rc
+    : > "$LAST_OUT"
+    case "${arc,,}" in
+        *.zip)
+            total=$(unzip -Zt "$arc" 2>/dev/null | sed -nE 's/^[0-9]+ files?, ([0-9]+) bytes uncompressed.*/\1/p' | head -n1)
+            unzip -o "$arc" -d "$dest" > "$LAST_OUT" 2>&1 < /dev/null & pid=$!
+            watch_proc "$pid" "Extracting" "$arc" dir "$dest" "${total:-0}" ;;
+        *.tar)
+            tar -xvf "$arc" -C "$dest" --no-same-owner > "$LAST_OUT" 2>&1 < /dev/null & pid=$!
+            watch_proc "$pid" "Extracting" "$arc" fd "$dest" 0 ;;
+        *)
+            tar -xzvf "$arc" -C "$dest" --no-same-owner > "$LAST_OUT" 2>&1 < /dev/null & pid=$!
+            watch_proc "$pid" "Extracting" "$arc" fd "$dest" 0 ;;
+    esac
+    wait "$pid"; rc=$?
     return $rc
 }
 pause() { if [ -t 0 ]; then echo; read -n 1 -s -r -p "Press any key to continue..."; echo; fi; return 0; }
@@ -342,7 +429,8 @@ do_scan() {
     local tmp="$SCAN_FILE.$BASHPID" r
     : > "$tmp"
     for r in "${SCAN_ROOTS[@]}"; do
-        find -L "$r" -maxdepth 10 \( -path '*/Android/data' -o -path '*/Android/obb' -o -name '.*' \) -prune -o \
+        find -L "$r" -maxdepth 8 \( -path '*/Android' -o -name '.*' -o -name DCIM -o -name Pictures -o -name Movies -o -name Music \
+                       -o -name Podcasts -o -name Ringtones -o -name Alarms -o -name Notifications -o -name WhatsApp \) -prune -o \
             -type f \( -iname '*.img' -o -iname '*.zip' -o -iname '*.tgz' -o -iname '*.tar' -o -iname '*.tar.gz' \
                        -o -iname '*.img.xz' -o -iname '*.img.gz' -o -iname 'flash_all*.sh' \) -print 2>/dev/null
     done | sort -u > "$tmp"
@@ -743,14 +831,9 @@ extract_archive() {
         for where in "$dl" "$(dirname "$arc")" "$ROMS_DIR"; do
             [ -d "$where" ] && [ -w "$where" ] || continue
             tmp="$where/${base}_extracted.partial"; rm -rf "$tmp"; mkdir -p "$tmp" 2>/dev/null || continue
-            case "${arc,,}" in
-                *.zip)
-                    type -P unzip >/dev/null 2>&1 || animate "Installing unzip" apt_install unzip
-                    animate "Extracting $(basename "$arc")" unzip -q -o "$arc" -d "$tmp" ;;
-                *.tar) animate "Extracting $(basename "$arc")" tar -xf "$arc" -C "$tmp" --no-same-owner ;;
-                *)     animate "Extracting $(basename "$arc")" tar -xzf "$arc" -C "$tmp" --no-same-owner ;;
-            esac
-            if [ $? -ne 0 ]; then warn "Extraction failed here, trying another place..."; rm -rf "$tmp"; continue; fi
+            case "${arc,,}" in *.zip) type -P unzip >/dev/null 2>&1 || animate "Installing unzip" apt_install unzip ;; esac
+            extract_progress "$arc" "$tmp"
+            if [ $? -ne 0 ]; then warn "Extraction failed here:"; tail -n 2 "$LAST_OUT"; rm -rf "$tmp"; continue; fi
             if ! find "$tmp" -maxdepth 6 -type f -iname 'flash_all*.sh' 2>/dev/null | grep -q .; then
                 bad "This archive does not contain a fastboot ROM (no flash_all script)."; rm -rf "$tmp"; return 1
             fi
@@ -858,6 +941,7 @@ run_plan() { # run_plan <start_step>
     for step in "${PLAN[@]}"; do
         n=$((n + 1))
         [ "$n" -lt "$start" ] && continue
+        PROG_N=$n; PROG_TOTAL=$total
         IFS="$US" read -ra toks <<< "$step"
         short="${toks[*]:0:2}"; short="${short//$R_IMGDIR\//}"
         tries=3; [[ " ${toks[*]} " == *" reboot "* ]] && tries=1
@@ -867,7 +951,7 @@ run_plan() { # run_plan <start_step>
             run_step "[$n/$total] $short" "$tries" "${toks[@]}"; rc=$?
         fi
         if [ "$rc" -eq 0 ]; then
-            echo -e " ${GREEN}✔${RESET} ${GRAY}[$n/$total]${RESET} $(shorten "$short" $((COLS - 14)))"
+            echo -e " ${GREEN}✔${RESET} ${GRAY}[$n/$total] $((n * 100 / total))%${RESET} $(shorten "$short" $((COLS - 22)))"
             echo "${R_KIND}|${R_SRC}|${n}|${R_IMGDIR}|${R_TEMP}" > "$RESUME_FILE"
         elif [ "$rc" -eq 99 ]; then stop=1; break
         elif [[ " ${toks[*]} " == *" flash "* || " ${toks[*]} " == *" set_active "* ]]; then
@@ -878,9 +962,10 @@ run_plan() { # run_plan <start_step>
             echo "${R_KIND}|${R_SRC}|${n}|${R_IMGDIR}|${R_TEMP}" > "$RESUME_FILE"
         fi
     done
+    PROG_TOTAL=0; PROG_N=0
     echo ""
     if [ "$stop" -eq 0 ]; then
-        rm -f "$RESUME_FILE"; ok "ROM flashed successfully!"
+        rm -f "$RESUME_FILE"; ok "ROM flashed successfully! (100%)"
     else
         bad "Stopped at step $n of $total. Do NOT boot the phone yet."
         warn "Reconnect, open menu 3 again: it will offer to RESUME."
@@ -1012,8 +1097,9 @@ flash_gsi_screen() {
         mkdir -p "$GSI_DIR"; sysimg="$GSI_DIR/system.img"; rm -f "$sysimg"
         local free; free=$(df -kP "$HOME" 2>/dev/null | awk 'NR==2{print $4}')
         if [[ "${free:-}" =~ ^[0-9]+$ ]] && [ "$free" -lt 4000000 ]; then warn "Low free space ($((free / 1024)) MB). Decompress may fail."; fi
-        animate "Decompressing $bn" bash -c "$dec -dc \"\$1\" > \"\$2\"" _ "$gsi" "$sysimg" \
-            || { bad "Decompression failed."; tail -n 3 "$LAST_OUT"; rm -f "$sysimg"; pause; return 1; }
+        ( "$dec" -dc "$gsi" > "$sysimg" ) 2> "$LAST_OUT" < /dev/null & local dpid=$!
+        watch_proc "$dpid" "Decompressing" "$gsi" fd "$sysimg" 0
+        wait "$dpid" || { bad "Decompression failed."; tail -n 3 "$LAST_OUT"; rm -f "$sysimg"; pause; return 1; }
         ok "Decompressed ($(human_size "$sysimg"))." ;;
     esac
 
@@ -1145,7 +1231,9 @@ check_device() {
 }
 
 main_menu() {
+    local n_img=0 n_zip=0 n_gsi=0
     clear; calc_layout
+    echo -e "\n${M}${GRAY}Starting...${RESET}"
     ensure_base
     setup_tools
     type -P unzip >/dev/null 2>&1 || animate "Installing unzip" apt_install unzip
@@ -1164,29 +1252,29 @@ main_menu() {
         # ---- all slow work happens BEFORE clearing (the screen is never blank) ----
         if [ ! -f "$RT_STAMP" ] || [ "$SCAN_FILE" -nt "$RT_STAMP" ] || [ "$ZIPKIND_FILE" -nt "$RT_STAMP" ]; then
             refresh_rom_trees; touch "$RT_STAMP"
+            n_img=$(standalone_imgs | grep -c . || true)
+            n_zip=$(sideload_zips | grep -c . || true)
+            n_gsi=$(gsi_candidates | grep -c . || true)
         fi
         if [ "$USB_MODE" = native ]; then
             if fb_present; then DEV_STATE=fastboot; elif adb_present; then DEV_STATE=adb; else DEV_STATE=none; fi
         fi
-        local n_img n_zip n_gsi
-        n_img=$(standalone_imgs | grep -c . || true)
-        n_zip=$(sideload_zips | grep -c . || true)
-        n_gsi=$(gsi_candidates | grep -c . || true)
 
         clear; calc_layout
         local fb=0 ad=0
         [ "$DEV_STATE" = fastboot ] && fb=1
         [ "$DEV_STATE" = adb ] && ad=1
         # dots = tool installed (green) / missing (red)
-        local d1="${RED}●${RESET}" d2="${RED}●${RESET}" dev="${RED}Not connected${RESET}"
+        local d1="${RED}●${RESET}" d2="${RED}●${RESET}" d3="${RED}●${RESET}" dev="${RED}Not connected${RESET}"
         if type -P fastboot >/dev/null 2>&1 || type -P termux-fastboot >/dev/null 2>&1; then d1="${GREEN}●${RESET}"; fi
         if type -P adb >/dev/null 2>&1 || type -P termux-adb >/dev/null 2>&1; then d2="${GREEN}●${RESET}"; fi
+        if command -v python3 >/dev/null 2>&1; then d3="${GREEN}●${RESET}"; fi
         [ "$fb" -eq 1 ] && dev="${GREEN}Connected (fastboot)${RESET}"
         [ "$ad" -eq 1 ] && dev="${GREEN}Connected (adb)${RESET}"
         [ "$DEV_STATE" = unchecked ] && dev="${GRAY}Not checked (press c)${RESET}"
 
         draw_box "ANDROID ULTIMATE FLASHER" "Version ${VERSION} - Created by Rudra"
-        echo -e "\n${M}Tools    $d1 fastboot  $d2 adb"
+        echo -e "\n${M}Tools    $d1 fastboot  $d2 adb  $d3 python"
         echo -e "${M}USB      ${USB_MODE} mode\n${M}Device   $dev"
         echo -e "${M}Phone    ${n_img} img • ${n_zip} zip • ${#ROM_PATH[@]} rom • ${n_gsi} gsi"
         [ -f "$RESUME_FILE" ] && echo -e "${M}${YELLOW}⚠ Unfinished flash found - open 3 to resume${RESET}"
