@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Android Ultimate Flasher - Version 1.3
+# Android Ultimate Flasher - Version 1.4
 # Termux tool. Run once:  bash android_flasher_v1.1.sh   -> afterwards just: rudra
+# v1.4: first start no longer freezes (big .tgz archives are checked once, with a time limit,
+#       during the scan - never on the blank screen); broken "sleep" binary detected and repaired.
 # v1.3: live PERCENT bars (extracting / decompressing / flashing), faster scan + menu.
 # v1.2: fast start, no decoration animations, no wake-lock notification at start
 #       (only held while flashing), works even when the "sleep" binary is missing,
@@ -10,7 +12,7 @@
 
 set -uo pipefail
 
-VERSION="1.3"
+VERSION="1.4"
 BASE_DIR="$HOME/.android-ultimate-flashing-tool"
 ROMS_DIR="$HOME/flasher_roms"
 LOG_FILE="$BASE_DIR/tool.log"
@@ -33,8 +35,11 @@ US=$'\x1f'
 
 # "sleep" fallback: some broken Termux installs lose /usr/bin/sleep (error: sleep: No such file).
 # Then use a pure-bash wait so the tool never spams errors or busy-loops.
-HAVE_SLEEP=0; type -P sleep >/dev/null 2>&1 && HAVE_SLEEP=1
-sleep() { if [ "$HAVE_SLEEP" = 1 ]; then command sleep "$@"; else read -rt "${1:-1}" <> <(:) || true; fi; }
+HAVE_SLEEP=0; command sleep 0 >/dev/null 2>&1 && HAVE_SLEEP=1     # really RUN it: a broken file still shows up in PATH
+sleep() {
+    if [ "$HAVE_SLEEP" = 1 ]; then command sleep "$@" 2>/dev/null && return 0; HAVE_SLEEP=0; fi
+    read -rt "${1:-1}" <> <(:) || true
+}
 
 say()  { echo -e "${BLUE}[*]${RESET} $*"; echo "[INFO] $*" >> "$LOG_FILE"; }
 ok()   { echo -e "${GREEN}[+]${RESET} $*"; echo "[OK] $*" >> "$LOG_FILE"; }
@@ -229,8 +234,9 @@ curl_ok() { curl --version >/dev/null 2>&1; }
 
 # Basic tools check (coreutils etc.). Installs only what is really missing.
 ensure_base() {
-    local need=() c
-    for c in sleep stat du df timeout tr cut sort head tail basename dirname realpath; do
+    local need=() flags=() c
+    if ! command sleep 0 >/dev/null 2>&1; then need+=(coreutils); flags=(--reinstall); fi   # sleep missing OR broken
+    for c in stat du df timeout tr cut sort head tail basename dirname realpath; do
         type -P "$c" >/dev/null 2>&1 || { need+=(coreutils); break; }
     done
     type -P find >/dev/null 2>&1 || need+=(findutils)
@@ -240,11 +246,14 @@ ensure_base() {
     type -P tput >/dev/null 2>&1 || need+=(ncurses-utils)
     type -P tar  >/dev/null 2>&1 || need+=(tar)
     [ "${#need[@]}" -eq 0 ] && return 0
-    warn "Basic tools missing: ${need[*]} - installing..."
-    animate "Installing ${need[*]}" apt_install "${need[@]}" \
+    # one repair attempt per hour (a failing repair must not slow down every start)
+    [ -n "$(find "$BASE_DIR/.base_tried" -mmin -60 2>/dev/null)" ] && return 0
+    touch "$BASE_DIR/.base_tried"
+    warn "Basic tools missing/broken: ${need[*]} - fixing..."
+    animate "Installing ${need[*]}" apt_install "${flags[@]}" "${need[@]}" \
         || { warn "Install failed. Run:  pkg install -y ${need[*]}"; tail -n 3 "$LAST_OUT"; }
     hash -r
-    type -P sleep >/dev/null 2>&1 && HAVE_SLEEP=1
+    command sleep 0 >/dev/null 2>&1 && HAVE_SLEEP=1
     return 0
 }
 
@@ -436,6 +445,8 @@ do_scan() {
     done | sort -u > "$tmp"
     mv -f "$tmp" "$SCAN_FILE"
     classify_zips
+    classify_tars
+    touch "$ZIPKIND_FILE"      # tells the menu: results are final, refresh the lists
     return 0
 }
 
@@ -479,16 +490,31 @@ human_size() { du -h "$1" 2>/dev/null | cut -f1; }
 #   script = extracted ROM folder      arc = big archive (.tgz / .tar.gz / .tar / .zip) with a flash_all script
 MIN_ARCHIVE_MB="${MIN_ARCHIVE_MB:-150}"
 ROM_KIND=(); ROM_PATH=()
-archive_has_script() { # looks at the first entries of a tar archive (remembered in the cache)
-    local f="$1" key lst r
+# Archives are listed ONCE (max TAR_PEEK_SECS seconds) while scanning, and remembered.
+# Reason: a .tgz with a huge first file cannot be listed quickly - that froze the first start.
+TAR_PEEK_SECS="${TAR_PEEK_SECS:-4}"
+archive_classify() {
+    local f="$1" key r tmp rc low
     key="tar:$(cache_key "$f")"
     r="$(cache_get "$key")" || r=""
-    if [ -z "$r" ]; then
-        lst=$(tar -tf "$f" 2>/dev/null | head -n 2000 || true)
-        if grep -qiE '(^|/)flash_all[^/]*\.sh$' <<< "$lst"; then r=yes; else r=no; fi
-        cache_put "$key" "$r"
-    fi
-    [ "$r" = yes ]
+    [ -n "$r" ] && return 0
+    tmp="$BASE_DIR/.peek.$BASHPID"
+    timeout "$TAR_PEEK_SECS" tar -tf "$f" 2>/dev/null | head -n 2000 > "$tmp"; rc=${PIPESTATUS[0]}
+    if grep -qiE '(^|/)flash_all[^/]*\.sh$' "$tmp"; then r=yes
+    elif [ "$rc" -eq 124 ]; then      # too slow to read: guess by name / size (extraction re-checks)
+        low="${f,,}"
+        if [[ "$low" == *image* || "$low" == *fastboot* ]] || [ "$(stat -c %s "$f" 2>/dev/null || echo 0)" -ge 1073741824 ]; then r=yes; else r=no; fi
+    else r=no; fi
+    rm -f "$tmp"; cache_put "$key" "$r"
+}
+archive_has_script() { local r; r="$(cache_get "tar:$(cache_key "$1")")" || r=""; [ "$r" = yes ]; }   # cache only = instant
+classify_tars() {
+    local f
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        [ "$(stat -c %s "$f" 2>/dev/null || echo 0)" -ge $((MIN_ARCHIVE_MB * 1048576)) ] || continue
+        archive_classify "$f"
+    done < <(scan_list '\.(tgz|tar\.gz|tar)$')
 }
 collect_roms() {
     ROM_KIND=(); ROM_PATH=()
