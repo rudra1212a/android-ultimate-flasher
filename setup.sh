@@ -86,12 +86,41 @@ make_bar() { # make_bar <percent> <width>
 }
 # Runs a command in the background with a spinner. While flashing it also shows a PERCENT bar:
 # fastboot "Sending sparse N/M" gives the exact part, PROG_N/PROG_TOTAL the overall step.
+# Is a fastboot process (or the USB runner that starts it) still alive?
+fb_running() {
+    local c n
+    for c in /proc/[0-9]*/comm; do
+        read -r n < "$c" 2>/dev/null || continue
+        case "$n" in *fastboot*|termux-usb*) return 0 ;; esac
+    done
+    return 1
+}
+# Waits (with spinner) until no fastboot process is left. Used before printing a final "success".
+finish_wait() {
+    local t=$SECONDS i=0
+    fb_running || return 0
+    printf '\033[?25l'
+    while fb_running && [ $((SECONDS - t)) -lt 120 ]; do
+        printf "\r\033[K${CYAN}[%s]${RESET} Finishing, please wait... ${GRAY}%ss${RESET}" "${SPIN[$((i % 10))]}" "$((SECONDS - t))"
+        i=$((i + 1)); sleep 0.2
+    done
+    printf "\r\033[K\033[?25h"
+}
 animate() {
-    local msg pid i=0 t=$SECONDS pct=-1 sp chunk a b
+    local msg pid i=0 t=$SECONDS pct=-1 sp chunk a b rc idle=0 cmd0="${2:-}" frame=0
     msg=$(shorten "$1" $((COLS - 30))); shift
     ("$@") > "$LAST_OUT" 2>&1 < /dev/null &
     pid=$!
     printf '\033[?25l'
+    _draw() {
+        if [ "$pct" -ge 0 ]; then
+            printf "\r\033[K${CYAN}[%s]${RESET} %s ${GREEN}%s${RESET} %3d%% ${GRAY}%ss${RESET}" \
+                "${SPIN[$((frame % 10))]}" "$msg" "$(make_bar "$pct" 10)" "$pct" "$((SECONDS - t))"
+        else
+            printf "\r\033[K${CYAN}[%s]${RESET} %s ${GRAY}%ss${RESET}" "${SPIN[$((frame % 10))]}" "$msg" "$((SECONDS - t))"
+        fi
+        frame=$((frame + 1))
+    }
     while kill -0 "$pid" 2>/dev/null; do
         if [ $((i % 8)) -eq 0 ]; then
             sp=-1
@@ -100,15 +129,22 @@ animate() {
             if [ "$PROG_TOTAL" -gt 0 ]; then pct=$(( ((PROG_N - 1) * 100 + (sp > 0 ? sp : 0)) / PROG_TOTAL ))
             elif [ "$sp" -ge 0 ]; then pct=$sp; else pct=-1; fi
         fi
-        if [ "$pct" -ge 0 ]; then
-            printf "\r\033[K${CYAN}[%s]${RESET} %s ${GREEN}%s${RESET} %3d%% ${GRAY}%ss${RESET}" \
-                "${SPIN[$((i % 10))]}" "$msg" "$(make_bar "$pct" 10)" "$pct" "$((SECONDS - t))"
-        else
-            printf "\r\033[K${CYAN}[%s]${RESET} %s ${GRAY}%ss${RESET}" "${SPIN[$((i % 10))]}" "$msg" "$((SECONDS - t))"
-        fi
-        i=$((i + 1)); sleep 0.1
+        _draw; i=$((i + 1)); sleep 0.1
     done
-    wait "$pid"; local rc=$?
+    wait "$pid"; rc=$?
+    # The USB runner may return BEFORE fastboot has really finished. Never report success early:
+    # keep waiting until fastboot printed "Finished"/"FAILED", or no fastboot process is left.
+    if [ "$cmd0" = fastboot ]; then
+        local sz=0 nsz=0
+        while [ $((SECONDS - t)) -lt 1800 ]; do
+            grep -qE 'Finished\. Total time|FAILED|fastboot: error' "$LAST_OUT" 2>/dev/null && break
+            nsz=$(stat -c %s "$LAST_OUT" 2>/dev/null || echo 0)
+            # still busy = a fastboot process exists OR its output is still growing
+            if fb_running || [ "$nsz" != "$sz" ]; then idle=0; sz=$nsz; else idle=$((idle + 1)); [ "$idle" -ge 24 ] && break; fi
+            _draw; sleep 0.25
+        done
+        grep -qE 'FAILED \(|fastboot: error' "$LAST_OUT" 2>/dev/null && rc=1
+    fi
     printf "\r\033[K\033[?25h"
     return $rc
 }
@@ -521,6 +557,10 @@ arc_extracted_dir() {
     done
     return 1
 }
+rom_label() { # name shown in the list: the *_extracted* folder name when there is one
+    local par; par="$(basename "$(dirname "$1")")"
+    if [[ "$par" == *_extracted* ]]; then printf '%s' "$par"; else printf '%s' "$(basename "$1")"; fi
+}
 collect_roms() {
     ROM_KIND=(); ROM_PATH=()
     local f d n base seen=$'\n' i j dup
@@ -829,7 +869,7 @@ extract_archive() {
     dl="$STORAGE_ROOT/Download"; mkdir -p "$dl" 2>/dev/null
 
     # already extracted somewhere? (the extracted folder is KEPT - never deleted by this tool)
-    found=$(arc_extracted_dir "$arc") || found=""
+    found=""      # choosing the ARCHIVE always extracts it again, into a NEW folder (old folders stay untouched)
     if [ -n "$found" ]; then
         ok "This ROM is already extracted:"
         echo -e " ${BOLD}$(dirname "$found" | sed "s#^$STORAGE_ROOT/##")${RESET}"
@@ -973,9 +1013,10 @@ run_plan() { # run_plan <start_step>
         fi
     done
     PROG_TOTAL=0; PROG_N=0
+    finish_wait
     echo ""
     if [ "$stop" -eq 0 ]; then
-        rm -f "$RESUME_FILE"; ok "ROM flashed successfully! (100%)"
+        rm -f "$RESUME_FILE"; ok "ROM flashed successfully! (100%)"; echo -e " ${GRAY}Wait until the phone has restarted before unplugging.${RESET}"
     else
         bad "Stopped at step $n of $total. Do NOT boot the phone yet."
         warn "Reconnect, open menu 3 again: it will offer to RESUME."
@@ -1028,15 +1069,15 @@ flash_fastboot_screen() {
             *)      k="${YELLOW}ARCHIVE${RESET}" ;;
         esac
         if [ "${ROM_KIND[$i]}" = arc ]; then
-            if arc_extracted_dir "${ROM_PATH[$i]}" >/dev/null; then k="${YELLOW}ARCHIVE${RESET}"; x=" ${GREEN}✔extracted${RESET}"; else x=""; fi
+            if arc_extracted_dir "${ROM_PATH[$i]}" >/dev/null; then k="${YELLOW}ARCHIVE${RESET}"; x=" ${GREEN}✔has folder${RESET}"; else x=""; fi
             LIST+=("$k $(shorten "$(basename "${ROM_PATH[$i]}")" $((COLS - 40))) ${GRAY}$(human_size "${ROM_PATH[$i]}")${RESET}$x")
         else
-            LIST+=("$k $(shorten "$(basename "${ROM_PATH[$i]}")" $((COLS - 20)))")
+            LIST+=("$k $(shorten "$(rom_label "${ROM_PATH[$i]}")" $((COLS - 20)))")
         fi
     done
     echo -e " ${CYAN}Fastboot ROMs on your phone:${RESET}"
     echo -e " ${GRAY}FOLDER = already extracted (flashes directly)${RESET}"
-    echo -e " ${GRAY}ARCHIVE = extracted into Download first (folder is kept)${RESET}\n"
+    echo -e " ${GRAY}ARCHIVE = extracts again into a NEW folder, then flashes${RESET}\n"
     pick_index "Select ROM" || { say "Cancelled."; pause; return 0; }
     local sel="${ROM_PATH[$IDX]}"
     R_KIND="${ROM_KIND[$IDX]}"; R_SRC="$sel"; R_TEMP=0
@@ -1180,7 +1221,7 @@ reboot_to() { # reboot_to <mode> <label>
     [ "$1" != system ] && cmd+=("$1")
     if fb_present; then animate "Rebooting to $2" fastboot "${cmd[@]}"; rc=$?
     else animate "Rebooting to $2" adb "${cmd[@]}"; rc=$?; fi
-    if [ "$rc" -eq 0 ]; then ok "Reboot command sent ($2)."; else bad "Reboot failed."; tail -n 3 "$LAST_OUT"; fi
+    if [ "$rc" -eq 0 ]; then finish_wait; ok "Reboot command finished ($2). Wait for the phone before unplugging."; else bad "Reboot failed."; tail -n 3 "$LAST_OUT"; fi
 }
 reboot_screen() {
     header "Reboot Options"
