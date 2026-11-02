@@ -34,6 +34,11 @@ sleep() {
     if [ "$HAVE_SLEEP" = 1 ]; then command sleep "$@" 2>/dev/null && return 0; HAVE_SLEEP=0; fi
     read -rt "${1:-1}" <> <(:) || true
 }
+# nap = short wait WITHOUT starting a new process each time (a forked "sleep" 10x per second
+# makes slow / old phones even slower). One pipe is opened once and re-used.
+NAPFD=""
+exec {NAPFD}<> <(:) 2>/dev/null || NAPFD=""
+nap() { if [ -n "$NAPFD" ]; then read -rt "${1:-0.1}" -u "$NAPFD" || true; else sleep "${1:-0.1}"; fi; }
 
 say()  { echo -e "${BLUE}[*]${RESET} $*"; echo "[INFO] $*" >> "$LOG_FILE"; }
 ok()   { echo -e "${GREEN}[+]${RESET} $*"; echo "[OK] $*" >> "$LOG_FILE"; }
@@ -56,7 +61,7 @@ calc_layout() {
     COLS=$c; CW=46; [ "$COLS" -lt 48 ] && CW=$((COLS - 2))
     M=$(printf '%*s' "$(( (COLS - CW) / 2 ))" '')
 }
-hline() { local s; s=$(printf '%*s' "$1" ''); printf '%s' "${s// /$2}"; }
+hline() { local s; printf -v s '%*s' "$1" ''; printf '%s' "${s// /$2}"; }
 center() {
     local len=${#1} l r
     l=$(( ($2 - len) / 2 )); r=$(( $2 - len - l ))
@@ -78,11 +83,13 @@ header() { clear; calc_layout; draw_box "$1"; echo ""; }
 
 # ------------------------------ Animations ------------------------------------
 PROG_N=0; PROG_TOTAL=0      # overall step counter for the flashing percent bar (0 = off)
-make_bar() { # make_bar <percent> <width>
-    local p=$1 w=$2 f
+BAR=""
+make_bar() { # make_bar <percent> <width>  -> sets $BAR (no subshell = fast)
+    local p=$1 w=$2 f x y
     [ "$p" -gt 100 ] && p=100; [ "$p" -lt 0 ] && p=0
     f=$(( p * w / 100 ))
-    printf '%s%s' "$(hline "$f" "█")" "$(hline "$((w - f))" "░")"
+    printf -v x '%*s' "$f" ''; printf -v y '%*s' "$((w - f))" ''
+    BAR="${x// /█}${y// /░}"
 }
 # Runs a command in the background with a spinner. While flashing it also shows a PERCENT bar:
 # fastboot "Sending sparse N/M" gives the exact part, PROG_N/PROG_TOTAL the overall step.
@@ -109,7 +116,7 @@ finish_wait() {
     printf '\033[?25l'
     while fb_running && [ $((SECONDS - t)) -lt 120 ]; do
         printf "\r\033[K${CYAN}[%s]${RESET} Finishing, please wait... ${GRAY}%ss${RESET}" "${SPIN[$((i % 10))]}" "$((SECONDS - t))"
-        i=$((i + 1)); sleep 0.2
+        i=$((i + 1)); nap 0.2
     done
     printf "\r\033[K\033[?25h"
 }
@@ -139,7 +146,7 @@ animate() {
     _draw() {
         if [ "$pct" -ge 0 ]; then
             printf "\r\033[K${CYAN}[%s]${RESET} %s ${GREEN}%s${RESET} %3d%% ${GRAY}%ss${RESET}" \
-                "${SPIN[$((frame % 10))]}" "$msg" "$(make_bar "$pct" 10)" "$pct" "$((SECONDS - t))"
+                "${SPIN[$((frame % 10))]}" "$msg" "$BAR" "$pct" "$((SECONDS - t))"
         else
             printf "\r\033[K${CYAN}[%s]${RESET} %s ${GRAY}%ss${RESET}" "${SPIN[$((frame % 10))]}" "$msg" "$((SECONDS - t))"
         fi
@@ -158,13 +165,14 @@ animate() {
             if [ -n "$chunk" ]; then read -r a b <<< "$chunk"; [ "${b:-0}" -gt 0 ] && sp=$(( (a - 1) * 100 / b )); fi
             if [ "$PROG_TOTAL" -gt 0 ]; then pct=$(( ((PROG_N - 1) * 100 + (sp > 0 ? sp : 0)) / PROG_TOTAL ))
             elif [ "$sp" -ge 0 ]; then pct=$sp; else pct=-1; fi
+            [ "$pct" -ge 0 ] && make_bar "$pct" 10
             if [ "$cmd0" = fastboot ]; then
                 nsz=$(stat -c %s "$LAST_OUT" 2>/dev/null || echo 0)
                 if [ "$nsz" != "$sz" ]; then sz=$nsz; chg=$SECONDS
                 elif [ $((SECONDS - chg)) -ge "$STALL_SECS" ]; then _keep_waiting || { stalled=1; break; }; fi
             fi
         fi
-        _draw; i=$((i + 1)); sleep 0.1
+        _draw; i=$((i + 1)); nap 0.1
     done
     if [ "$stalled" = 1 ]; then
         kill "$pid" 2>/dev/null; fb_kill; wait "$pid" 2>/dev/null
@@ -183,7 +191,7 @@ animate() {
                 idle=0
                 if [ $((SECONDS - chg)) -ge "$STALL_SECS" ]; then _keep_waiting || { stalled=1; break; }; fi
             else idle=$((idle + 1)); [ "$idle" -ge 24 ] && break; fi
-            _draw; sleep 0.25
+            _draw; nap 0.25
         done
         if [ "$stalled" = 1 ]; then
             fb_kill; echo "FAILED (stalled: no progress, stopped)" >> "$LAST_OUT"
@@ -229,16 +237,17 @@ watch_proc() { # watch_proc <pid> <label> <archive> <fd|dir> <dest> <total_bytes
                 pos=$(fd_pos "$inode"); [ "$pos" -gt 0 ] && pct=$(( pos * 100 / sz ))
             fi
             [ "$pct" -gt 99 ] && pct=99
+            [ "$pct" -ge 0 ] && make_bar "$pct" 10
             name=$(tail -n1 "$LAST_OUT" 2>/dev/null | tr -d '\r'); name="${name##*: }"; name="${name##*/}"; name="${name%"${name##*[![:space:]]}"}"
             [ -n "$name" ] && name=$(shorten "$name" "$nw")
         fi
         if [ "$pct" -ge 0 ]; then
             printf "\r\033[K${CYAN}[%s]${RESET} %s ${GREEN}%s${RESET} %3d%% ${GRAY}%s %ss${RESET}" \
-                "${SPIN[$((i % 10))]}" "$label" "$(make_bar "$pct" 10)" "$pct" "$name" "$((SECONDS - t))"
+                "${SPIN[$((i % 10))]}" "$label" "$BAR" "$pct" "$name" "$((SECONDS - t))"
         else
             printf "\r\033[K${CYAN}[%s]${RESET} %s ${GRAY}%s %ss${RESET}" "${SPIN[$((i % 10))]}" "$label" "$name" "$((SECONDS - t))"
         fi
-        i=$((i + 1)); sleep 0.1
+        i=$((i + 1)); nap 0.1
     done
     printf "\r\033[K\033[?25h"
 }
@@ -304,9 +313,13 @@ fix_ssl() {
     export DEBIAN_FRONTEND=noninteractive
     local opts=(-y -o Dpkg::Options::=--force-confold -o Dpkg::Options::=--force-confdef
                 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o Acquire::Retries=2)
-    apt-get update "${opts[@]}" || true
-    apt-get full-upgrade "${opts[@]}" || true
-    apt-get install --reinstall "${opts[@]}" openssl libcurl curl git || apt-get install "${opts[@]}" openssl libcurl curl git
+    # 1) quick try: just reinstall the matching packages (seconds)
+    timeout 300 apt-get install --reinstall "${opts[@]}" openssl libcurl curl || true
+    curl --version >/dev/null 2>&1 && return 0
+    # 2) still broken: refresh lists + full upgrade (slow, only when really needed)
+    timeout 900 apt-get update "${opts[@]}" || true
+    timeout 1500 apt-get full-upgrade "${opts[@]}" || true
+    timeout 300 apt-get install --reinstall "${opts[@]}" openssl libcurl curl || true
 }
 # returns 0 when curl really works (the broken-library case makes this fail)
 curl_ok() { curl --version >/dev/null 2>&1; }
@@ -337,20 +350,29 @@ ensure_base() {
 }
 
 # USB helper (no-root): download with timeouts, never hangs forever
+HELPER_F="$BASE_DIR/termux-adb-install.sh"
+HELPER_URL="https://raw.githubusercontent.com/nohajc/termux-adb/master/install.sh"
+PREF_PID=""
+prefetch_helper() { # download the helper script in the background while apt installs packages
+    type -P curl >/dev/null 2>&1 || return 0
+    rm -f "$HELPER_F" "$HELPER_F.part"
+    ( curl -fsSL --connect-timeout 8 --max-time 60 -o "$HELPER_F.part" "$HELPER_URL" && mv -f "$HELPER_F.part" "$HELPER_F" ) >/dev/null 2>&1 < /dev/null &
+    PREF_PID=$!
+}
 install_helper() {
-    local f="$BASE_DIR/termux-adb-install.sh"
-    curl -fsSL --connect-timeout 8 --max-time 60 -o "$f" \
-        https://raw.githubusercontent.com/nohajc/termux-adb/master/install.sh || return 1
-    timeout 240 bash "$f" < /dev/null
+    [ -s "$HELPER_F" ] || curl -fsSL --connect-timeout 8 --max-time 60 -o "$HELPER_F" "$HELPER_URL" || return 1
+    timeout 300 bash "$HELPER_F" < /dev/null
 }
 
 # Installs everything automatically (first start only, or menu 9). Next starts skip this completely.
 setup_tools() { # setup_tools [force]
     local marker="$BASE_DIR/.setup_done" force="${1:-}" need=()
+    if [ -z "$force" ] && [ -f "$marker" ] && type -P fastboot >/dev/null 2>&1; then return 0; fi
+    echo -e " ${GRAY}First start: installing the tools (one time, needs internet).${RESET}"
 
-    # Auto-repair broken curl/openssl (runs on every start, costs nothing when curl works)
+    # Repair broken curl/openssl only now (not on every start)
     local stamp="$BASE_DIR/.ssl_tried"
-    if ! curl_ok && { [ -n "$force" ] || [ -z "$(find "$stamp" -mmin -60 2>/dev/null)" ]; }; then
+    if type -P curl >/dev/null 2>&1 && ! curl_ok && { [ -n "$force" ] || [ -z "$(find "$stamp" -mmin -60 2>/dev/null)" ]; }; then
         touch "$stamp"
         warn "curl/openssl is broken (library mismatch). Repairing..."
         animate "Fixing Termux packages (openssl/curl)" fix_ssl \
@@ -359,22 +381,31 @@ setup_tools() { # setup_tools [force]
         if curl_ok; then ok "curl works now."; else bad "curl is still broken. Try: termux-change-repo, then re-run."; fi
     fi
 
-    if [ -z "$force" ] && [ -f "$marker" ] && type -P fastboot >/dev/null 2>&1; then return 0; fi
     type -P fastboot   >/dev/null 2>&1 || need+=(android-tools)
     type -P termux-usb >/dev/null 2>&1 || need+=(termux-api)
     type -P curl       >/dev/null 2>&1 || need+=(curl)
     type -P unzip      >/dev/null 2>&1 || need+=(unzip)
+    type -P termux-fastboot >/dev/null 2>&1 || prefetch_helper      # downloads while apt works
     if [ "${#need[@]}" -gt 0 ]; then
         animate "Installing ${need[*]}" apt_install "${need[@]}" \
             || { warn "Package install failed (check internet):"; tail -n 3 "$LAST_OUT"; }
     fi
+    [ -n "$PREF_PID" ] && { wait "$PREF_PID" 2>/dev/null; PREF_PID=""; }
     if ! type -P termux-fastboot >/dev/null 2>&1; then
         animate "Installing USB helper (no-root)" install_helper \
             || { warn "USB helper download failed:"; tail -n 3 "$LAST_OUT"; }
     fi
-    hash -r; detect_usb_mode; touch "$marker"
+    hash -r; detect_usb_mode
+    if type -P fastboot >/dev/null 2>&1 || type -P termux-fastboot >/dev/null 2>&1; then touch "$marker"; fi
     if [ "$USB_MODE" = termux ]; then ok "USB helper ready (no-root mode)."
     else warn "USB helper not installed (check internet). Menu 9 retries."; fi
+}
+# Tools are installed the first time they are really needed (the home page opens at once)
+need_tools() {
+    [ -f "$BASE_DIR/.setup_done" ] && type -P fastboot >/dev/null 2>&1 && return 0
+    setup_tools
+    type -P fastboot >/dev/null 2>&1 || type -P termux-fastboot >/dev/null 2>&1 || { bad "fastboot is not installed. Check internet, then open menu 9."; return 1; }
+    return 0
 }
 
 # (no pipe into "grep -q": with pipefail that can fail by mistake)
@@ -441,6 +472,7 @@ device_card() {
 
 # wait_for_device fastboot|sideload|any  -> 0 found, 1 user pressed back
 wait_for_device() {
+    need_tools || return 1
     local mode="$1" label="$1" tip chk=5 key="" i=0 t=$SECONDS hinted=0 asked=0 note=""
     case "$mode" in
         fastboot) tip="Phone: power off, hold Power + Volume Down." ;;
@@ -467,7 +499,7 @@ wait_for_device() {
             if read -rsn1 -t 0.2 key; then
                 case "$key" in 0|q|Q|b|B) printf "\r\033[K\033[?25h"; say "Cancelled."; return 1 ;; esac
             fi
-        else sleep 0.2; fi
+        else nap 0.2; fi
         if [ $((i % chk)) -eq 0 ]; then
             if _here; then
                 printf "\r\033[K\033[?25h"
@@ -501,7 +533,7 @@ setup_storage() {
     if _find_root; then found=1; else
         warn "Allow storage permission for Termux..."
         command -v termux-setup-storage >/dev/null 2>&1 && termux-setup-storage
-        for t in $(seq 1 20); do sleep 1; if _find_root; then found=1; break; fi; done
+        for t in $(seq 1 40); do nap 0.5; if _find_root; then found=1; break; fi; done
     fi
     if [ "$found" -eq 0 ]; then
         STORAGE_ROOT="$HOME/Download"; mkdir -p "$STORAGE_ROOT"
@@ -1317,11 +1349,12 @@ setup_screen() {
 }
 
 # ------------------------------ Main menu -------------------------------------
-mline() { echo -e "${M}$(printf '%2s' "$1") $2●${RESET} $(printf '%-18s' "$3") ${GRAY}$4${RESET}"; }
+mline() { local a b; printf -v a '%2s' "$1"; printf -v b '%-18s' "$3"; echo -e "${M}${a} $2●${RESET} ${b} ${GRAY}$4${RESET}"; }
 msec()  { echo -e "${M}${CYAN}── $1 ──${RESET}"; }
 
 # Quick device check with timeouts (never hangs)
 check_device() {
+    need_tools || return 0
     local fbc=fastboot adc=adb fo ao
     [ "$USB_MODE" = termux ] && { fbc=termux-fastboot; adc=termux-adb; }
     say "Checking device (tap Allow if asked)..."
@@ -1332,22 +1365,17 @@ check_device() {
     return 0
 }
 
+SCAN_PID=""
 main_menu() {
     local n_img=0 n_zip=0 n_gsi=0
     clear; calc_layout
-    echo -e "\n${M}${GRAY}Starting...${RESET}"
     ensure_base
-    setup_tools
-    type -P unzip >/dev/null 2>&1 || animate "Installing unzip" apt_install unzip
     setup_storage
     rm -f "$RT_STAMP"
-    if [ -s "$SCAN_FILE" ]; then
-        # fast start: use the last result, refresh the list quietly in the background
-        ( do_scan ) > /dev/null 2>&1 < /dev/null &
-        disown 2>/dev/null || true
-    else
-        scan_storage
-    fi
+    # the phone scan runs in the background: the home page opens immediately
+    ( do_scan ) > /dev/null 2>&1 < /dev/null &
+    SCAN_PID=$!
+    disown 2>/dev/null || true
 
     while true; do
         unlock_awake        # wake lock (and its notification) only exists while flashing
@@ -1378,7 +1406,12 @@ main_menu() {
         draw_box "ANDROID ULTIMATE FLASHER" "Version ${VERSION} - Created by Rudra"
         echo -e "\n${M}Tools    $d1 fastboot  $d2 adb  $d3 python"
         echo -e "${M}USB      ${USB_MODE} mode\n${M}Device   $dev"
-        echo -e "${M}Phone    ${n_img} img • ${n_zip} zip • ${#ROM_PATH[@]} rom • ${n_gsi} gsi"
+        local scanning=""
+        if [ -n "$SCAN_PID" ] && kill -0 "$SCAN_PID" 2>/dev/null; then scanning=" ${YELLOW}(scanning... Enter = refresh)${RESET}"; fi
+        echo -e "${M}Phone    ${n_img} img • ${n_zip} zip • ${#ROM_PATH[@]} rom • ${n_gsi} gsi${scanning}"
+        if [ ! -f "$BASE_DIR/.setup_done" ] || ! type -P fastboot >/dev/null 2>&1; then
+            echo -e "${M}${YELLOW}Tools install automatically on first use (needs internet)${RESET}"
+        fi
         [ -f "$RESUME_FILE" ] && echo -e "${M}${YELLOW}⚠ Unfinished flash found - open 3 to resume${RESET}"
         echo ""
         msec "FLASH"
@@ -1402,6 +1435,7 @@ main_menu() {
             3) flash_fastboot_screen ;; 4) flash_gsi_screen ;;
             5) device_info_screen ;;    6) switch_slot_screen ;;
             7) reboot_screen ;;         8) wipe_data_screen ;;
+            "") ;;                       # Enter = just redraw (updates the scan result)
             9) setup_screen ;;
             c|C) check_device; say "Device: $DEV_STATE"; sleep 1 ;;
             r|R) setup_storage; scan_storage; sleep 1 ;;
@@ -1427,11 +1461,11 @@ check_update() {
     [ "$self" = "$(realpath "$target" 2>/dev/null || echo x)" ] || return 0
     for d in "$HOME/storage/shared/Download" "/storage/emulated/0/Download" "/sdcard/Download"; do
         [ -d "$d" ] || continue
-        while IFS= read -r f; do
+        for f in "$d"/android_flasher*.sh "$d"/Android_flasher*.sh; do
             [ -f "$f" ] || continue
             mt=$(stat -c %Y "$f" 2>/dev/null || echo 0)
             if [ "$mt" -gt "$newest" ]; then newest="$mt"; cand="$f"; fi
-        done < <(find -L "$d" -maxdepth 2 -type f -iname 'android_flasher*.sh' 2>/dev/null)
+        done
         [ -n "$cand" ] && break
     done
     [ -n "$cand" ] || return 0
